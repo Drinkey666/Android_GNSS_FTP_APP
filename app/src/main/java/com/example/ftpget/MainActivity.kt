@@ -216,7 +216,7 @@ class MainActivity : AppCompatActivity() {
                 val clkOk = FtpDownloader.downloadLatestProduct(
                     ftpServer, ClockFolder, yearStr, doyStr, "CLK", localDir!!
                 ) { msg -> appendLog(msg) }
-
+               
                 // 下载偏差 (BIA/OSB) - 使用你指定的精确路径
                 val osbOk = FtpDownloader.downloadLatestProduct(
                     ftpServer, biasFolder, yearStr, doyStr, "BIA", localDir!!
