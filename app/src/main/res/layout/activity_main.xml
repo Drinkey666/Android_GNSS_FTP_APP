@@ -1,0 +1,191 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#F5F7FA"
+    android:padding="12dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="GNSS  PPP 定位"
+            android:textSize="22sp"
+            android:textStyle="bold"
+            android:textColor="#2C3E50"
+            android:layout_marginBottom="16dp"
+            android:gravity="center" />
+
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            app:cardCornerRadius="12dp"
+            app:cardElevation="4dp"
+            android:layout_marginBottom="16dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="1. 静态观测采集"
+                    android:textStyle="bold"
+                    android:textColor="#34495E"
+                    android:textSize="18sp" />
+
+                <Chronometer
+                    android:id="@+id/chronometer"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center"
+                    android:textSize="36sp"
+                    android:textColor="#2980B9"
+                    android:layout_marginVertical="12dp"/>
+
+                <TextView
+                    android:id="@+id/tvStatus"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="等待采集..."
+                    android:layout_gravity="center"
+                    android:textColor="#7F8C8D"
+                    android:layout_marginBottom="12dp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
+
+                    <Button
+                        android:id="@+id/btnStart"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="开始记录"
+                        android:backgroundTint="#27AE60"
+                        android:layout_marginEnd="8dp"/>
+
+                    <Button
+                        android:id="@+id/btnStop"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="停止"
+                        android:backgroundTint="#E74C3C" />
+                </LinearLayout>
+
+                <Button
+                    android:id="@+id/btnConvert"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="转换 RINEX (.26o) 文件"
+                    android:layout_marginTop="8dp" />
+
+                <TextView
+                    android:id="@+id/tvFilePath"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:textSize="12sp"
+                    android:textColor="#95A5A6"
+                    android:layout_marginTop="4dp" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            app:cardCornerRadius="12dp"
+            app:cardElevation="4dp"
+            android:layout_marginBottom="16dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="2. 武大 IGS 精密产品拉取"
+                    android:textStyle="bold"
+                    android:textColor="#34495E"
+                    android:textSize="18sp"
+                    android:layout_marginBottom="12dp"/>
+
+                <Button
+                    android:id="@+id/btnDownload"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="智能下载最新 SP3 / CLK"
+                    app:icon="@android:drawable/stat_sys_download"
+                    android:backgroundTint="#2980B9" />
+
+                <TextView
+                    android:id="@+id/tvLog"
+                    android:layout_width="match_parent"
+                    android:layout_height="120dp"
+                    android:layout_marginTop="12dp"
+                    android:background="#1E1E1E"
+                    android:textColor="#00FF00"
+                    android:textSize="11sp"
+                    android:padding="8dp"
+                    android:scrollbars="vertical"
+                    android:fontFamily="monospace"
+                    android:text="FTP 终端已就绪...\n" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            app:cardCornerRadius="12dp"
+            app:cardElevation="4dp"
+            app:strokeColor="#8E44AD"
+            app:strokeWidth="2dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="3. RTKLIB 事后解算"
+                    android:textStyle="bold"
+                    android:textColor="#8E44AD"
+                    android:textSize="18sp"
+                    android:layout_marginBottom="12dp"/>
+
+                <Button
+                    android:id="@+id/btnRunPpp"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="启动 PPP 引擎"
+                    android:backgroundTint="#8E44AD" />
+
+                <TextView
+                    android:id="@+id/tvPppResult"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:textSize="14sp"
+                    android:textColor="#2C3E50"
+                    android:text="解算结果将显示在这里..." />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+    </LinearLayout>
+</ScrollView>
