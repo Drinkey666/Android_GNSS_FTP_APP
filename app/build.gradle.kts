@@ -1,7 +1,24 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
 }
+
+// 本地凭据文件被 Git 忽略；新机器可以从 example 复制后填写，不能提交真实密码。
+// 缺少配置时仍可编译，沿用界面现有的“跳过 VMF3 下载”提示。
+val vmf3LocalProperties = Properties().apply {
+    val credentialsFile = rootProject.file("vmf3.local.properties")
+    if (credentialsFile.isFile) credentialsFile.inputStream().use { load(it) }
+}
+
+// BuildConfig 字段要求 Java 字符串字面量，转义防止引号/反斜杠等破坏生成代码。
+fun vmf3JavaString(value: String): String = "\"" + value
+    .replace("\\", "\\\\")
+    .replace("\"", "\\\"")
+    .replace("\r", "\\r")
+    .replace("\n", "\\n")
+    .replace("\t", "\\t") + "\""
 
 android {
     namespace = "com.example.ftpget"
@@ -16,6 +33,14 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
+        buildConfigField("String", "VMF3_USERNAME",
+            vmf3JavaString(vmf3LocalProperties.getProperty("vmf3.username", "")))
+        buildConfigField("String", "VMF3_PASSWORD",
+            vmf3JavaString(vmf3LocalProperties.getProperty("vmf3.password", "")))
+
+    }
+    buildFeatures {
+        buildConfig = true
     }
     externalNativeBuild {
         cmake {
@@ -38,6 +63,9 @@ android {
     }
     kotlinOptions {
         jvmTarget = "11"
+    }
+    testOptions {
+        unitTests.isReturnDefaultValues = true
     }
 }
 

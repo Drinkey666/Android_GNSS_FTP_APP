@@ -632,14 +632,29 @@ static void udclk_ppp(rtk_t *rtk)
 /* temporal update of tropospheric parameters --------------------------------*/
 static void udtrop_ppp(rtk_t *rtk)
 {
-    double pos[3],azel[]={0.0,PI/2.0},ztd,var;
+    double pos[3],azel[]={0.0,PI/2.0},ztd,var,mfh,mfw,zhd,zwd;
+    char vmf3dir[1024]={0},*p;
     int i=IT(&rtk->opt),j;
 
     trace(3,"udtrop_ppp:\n");
 
+    /* VMF3 directory is set with misc-pppopt=-VMF3DIR=/absolute/path.
+       Keep the grid out of rnx2rtkp's input list so it is never parsed as RINEX. */
+    if ((p=strstr(rtk->opt.pppopt,"-VMF3DIR="))) {
+        sscanf(p,"-VMF3DIR=%1023s",vmf3dir);
+    }
+    vmf3_set_dir(vmf3dir);
+
     if (rtk->x[i]==0.0) {
         ecef2pos(rtk->sol.rr,pos);
-        ztd=sbstropcorr(rtk->sol.time,pos,azel,&var);
+        if (vmf3_trop(rtk->sol.time,pos,azel,&mfh,&mfw,&zhd,&zwd)) {
+            ztd=zhd+zwd;
+            var=VAR_ZTD;
+            trace(3,"vmf3: initialize PPP ZTD=%.4f (ZHD=%.4f ZWD=%.4f)\n",ztd,zhd,zwd);
+        }
+        else {
+            ztd=sbstropcorr(rtk->sol.time,pos,azel,&var);
+        }
         initx(rtk,ztd,var,i);
 
         if (rtk->opt.tropopt>=TROPOPT_ESTG) {
@@ -855,13 +870,13 @@ static double trop_model_prec(gtime_t time, const double *pos,
                               double *var)
 {
     const double zazel[]={0.0,PI/2.0};
-    double zhd,m_h,m_w,cotz,grad_n,grad_e;
+    double zhd,zwd,m_h,m_w,cotz,grad_n,grad_e;
 
-    /* zenith hydrostatic delay */
-    zhd=tropmodel(time,pos,zazel,0.0);
-
-    /* mapping function */
-    m_h=tropmapf(time,pos,azel,&m_w);
+    if (!vmf3_trop(time,pos,azel,&m_h,&m_w,&zhd,&zwd)) {
+        /* Standard RTKLIB fallback if VMF3 is not configured or incomplete. */
+        zhd=tropmodel(time,pos,zazel,0.0);
+        m_h=tropmapf(time,pos,azel,&m_w);
+    }
 
     if (azel[1]>0.0) {
 

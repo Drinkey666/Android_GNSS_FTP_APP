@@ -1567,6 +1567,9 @@ EXPORT double tropmodel(gtime_t time, const double *pos, const double *azel,
                         double humi);
 EXPORT double tropmapf(gtime_t time, const double *pos, const double *azel,
                        double *mapfw);
+EXPORT void vmf3_set_dir(const char *dir);
+EXPORT int vmf3_trop(gtime_t time, const double *pos, const double *azel,
+                     double *mfh, double *mfw, double *zhd, double *zwd);
 EXPORT int iontec(gtime_t time, const nav_t *nav, const double *pos,
                   const double *azel, int opt, double *delay, double *var);
 EXPORT void readtec(const char *file, nav_t *nav, int opt);

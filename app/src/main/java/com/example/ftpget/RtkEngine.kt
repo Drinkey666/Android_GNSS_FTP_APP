@@ -1,14 +1,10 @@
 package com.example.ftpget
 
 object RtkEngine {
+    // RINEX postprocessing compiles the same PC RTKLIB snapshot as live PPP,
+    // plus the PC postpos.c. It remains a separate native library/state.
+    init { System.loadLibrary("rtklib_engine") }
 
-    // 🌟 核心修复：加载正确的库名！
-    init {
-        System.loadLibrary("rtklib_engine")
-    }
-
-    // 接收我们刚才在 MainActivity 里传过来的终极参数数组
+    /** OBS,NAV,SP3,CLK,BIA,IONEX,VMF3-left,VMF3-right,orography,ATX,POS,TRACE. */
     external fun runPpp(args: Array<String>): Int
-
-    // 如果你之前还有 startProcessing，保留或者删掉都可以，我们现在用 runPpp
 }

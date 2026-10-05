@@ -1,0 +1,5 @@
+# 复制为工程根目录 vmf3.local.properties，然后填写自己的 VMF3 账号。
+# 实际配置文件已加入 .gitignore；不要提交真实账号密码。
+# 本文件按 Java Properties 规则读取：值中的反斜杠写成 \\。
+vmf3.username=
+vmf3.password=

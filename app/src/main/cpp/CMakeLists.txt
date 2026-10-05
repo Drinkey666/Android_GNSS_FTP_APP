@@ -1,43 +1,52 @@
 cmake_minimum_required(VERSION 3.10.2)
 project("rtklib_engine")
 
-# 🌟 终极满血配置：防乱码 + 黑匣子 + 开启所有卫星系统 + 开启三频支持
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsigned-char -DTRACE -DENAGLO -DENAGAL -DENACMP -DENAQZS -DNFREQ=3")
-# 包含头文件目录
-include_directories("rtklib")
-
-# 🌟 终极白名单（已补齐 RTCM 依赖）
-set(RTKLIB_SRC
-        "rtklib/rtkcmn.c"
-        "rtklib/rinex.c"
-        "rtklib/rtkpos.c"
-        "rtklib/postpos.c"
-        "rtklib/solution.c"
-        "rtklib/lambda.c"
-        "rtklib/geoid.c"
-        "rtklib/sbas.c"
-        "rtklib/preceph.c"
-        "rtklib/pntpos.c"
-        "rtklib/ephemeris.c"
-        "rtklib/options.c"
-        "rtklib/ppp.c"
-        "rtklib/ppp_ar.c"
-        "rtklib/ionex.c"
-        "rtklib/tides.c"
-        "rtklib/trace.c"
-        "rtklib/rnx2rtkp.c"
-        # 👇 这四个是刚才缺失的 RTCM 依赖
-        "rtklib/rtcm.c"
-        "rtklib/rtcm2.c"
-        "rtklib/rtcm3.c"
-        "rtklib/rtcm3e.c"
-)
-
-# 编译成安卓可以用的 .so 动态库
-add_library(rtklib_engine SHARED
-        rtk_jni.c
-        ${RTKLIB_SRC})
-
-# 链接安卓系统的底层日志库和数学库
+# Match the PC observation/satellite layout in C and C++ translation units.
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsigned-char")
+# Both entry points compile the same unmodified snapshot of the PC core.
 find_library(log-lib log)
+
+# Independent real-time PPP prototype. The vendored sources are an unchanged
+# snapshot of the PC-validated core; do not mix them with the older engine above.
+set(PPP_LIVE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/ppp_live/rtklib")
+include("${CMAKE_CURRENT_SOURCE_DIR}/verify_ppp_profile.cmake")
+set(PPP_LIVE_SOURCES
+        "${PPP_LIVE_DIR}/smartphone_ppp_config.c"
+        "${PPP_LIVE_DIR}/gnss_adapter.c"
+        "${PPP_LIVE_DIR}/gnss_signal_policy.c"
+        "${PPP_LIVE_DIR}/rtkcmn.c"
+        "${PPP_LIVE_DIR}/rtkpos.c"
+        "${PPP_LIVE_DIR}/ppp.c"
+        "${PPP_LIVE_DIR}/ppp_ar.c"
+        "${PPP_LIVE_DIR}/pntpos.c"
+        "${PPP_LIVE_DIR}/preceph.c"
+        "${PPP_LIVE_DIR}/rinex.c"
+        "${PPP_LIVE_DIR}/ionex.c"
+        "${PPP_LIVE_DIR}/tides.c"
+        "${PPP_LIVE_DIR}/sofa.c"
+        "${PPP_LIVE_DIR}/lambda.c"
+        "${PPP_LIVE_DIR}/sbas.c"
+        "${PPP_LIVE_DIR}/ephemeris.c"
+        "${PPP_LIVE_DIR}/geoid.c"
+        "${PPP_LIVE_DIR}/solution.c"
+        "${PPP_LIVE_DIR}/trace.c")
+add_library(gnss_ppp_live SHARED gnss_jni.cpp ${PPP_LIVE_SOURCES})
+target_include_directories(gnss_ppp_live PRIVATE "${PPP_LIVE_DIR}")
+target_compile_definitions(gnss_ppp_live PRIVATE TRACE ENAGLO NFREQ=4)
+target_compile_options(gnss_ppp_live PRIVATE -fsigned-char -fvisibility=hidden -Wno-macro-redefined)
+target_link_options(gnss_ppp_live PRIVATE -Wl,-Bsymbolic)
+target_link_libraries(gnss_ppp_live ${log-lib} m)
+
+# RINEX postprocessing uses the PC postpos.c and the same PPP core. The JNI
+# bridge only replaces the PC console's hard-coded Windows paths and getchar().
+add_library(rtklib_engine SHARED rtk_jni.c ${PPP_LIVE_SOURCES}
+        "${PPP_LIVE_DIR}/postpos.c"
+        "${PPP_LIVE_DIR}/rtcm.c"
+        "${PPP_LIVE_DIR}/rtcm2.c"
+        "${PPP_LIVE_DIR}/rtcm3.c"
+        "${PPP_LIVE_DIR}/rtcm3e.c")
+target_include_directories(rtklib_engine PRIVATE "${PPP_LIVE_DIR}")
+target_compile_definitions(rtklib_engine PRIVATE TRACE ENAGLO NFREQ=4)
+target_compile_options(rtklib_engine PRIVATE -fsigned-char -fvisibility=hidden)
+target_link_options(rtklib_engine PRIVATE -Wl,-Bsymbolic)
 target_link_libraries(rtklib_engine ${log-lib} m)

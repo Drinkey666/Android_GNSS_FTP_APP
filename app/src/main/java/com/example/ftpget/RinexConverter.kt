@@ -1,19 +1,11 @@
-package com.example.ftpget // ★ 注意：保持你真实的包名 ★
+package com.example.ftpget // ★ 注意核对包名
 
-import android.content.Context
-import android.location.GnssClock
-import android.location.GnssMeasurement
-import android.location.GnssMeasurementsEvent
-import android.location.GnssStatus
-import android.location.Location
-import android.os.Build
 import android.util.Log
 import java.io.BufferedReader
 import java.io.BufferedWriter
 import java.io.File
 import java.io.FileReader
 import java.io.FileWriter
-import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -23,820 +15,832 @@ import java.util.TreeMap
 import kotlin.math.abs
 
 /**
- * A logger that converts GNSS measurements to RINEX 3.05 format.
- * (Strict Kotlin Translation for exact RTKLIB compatibility)
+ * 离线格式转换：本项目 Raw TXT → 识别星座/信号 → 合并历元和卫星 → 预处理 → RINEX 3.05 OBS。
+ * 与实时 LivePppNative/gnss_adapter 是两条独立入口，本对象并不调用实时 adapter。
+ *
+ * 注意：这里仍有自己的 ADR 0.50 m 门限、RESET/SLIP 当历元不写相位等规则，
+ * 不能因为都使用 Android Raw 就认定与实时入口完全等价。本次只解释现有规则，不修改它们。
+ * convert 会读入整份文件并建立多个列表，适用于离线转换，不是逐历元流式实时接口。
+ * 对象内含共享 signalMap/lastStats，当前界面禁止重复点击转换；不要并发转换两份文件。
  */
-class RinexLogger(private val mContext: Context) {
+object RinexConverter {
+    private const val TAG = "RinexConverter"
+    private const val CLIGHT = 299792458.0 // 真空光速(m/s)，用于 P=cΔt、λ=c/f。
+    private const val LEAP_SECOND = 18 // GLO 时间转换使用的固定 GPST-UTC 秒差，未从 TXT 动态读取。
+    private const val MAX_PRR_UNC_MPS = 10.0 // 伪距率 1σ 上限(m/s)，只控制 D 的有效性。
+    private const val MAX_TOW_UNC_NS = 500L // 卫星发射时标 1σ 上限(ns)，只控制 P 的有效性。
+    private const val MAX_ADR_UNC_METERS = 0.50 // 离线 L 的 ADR 1σ 上限(m)，实时 JNI 当前为 1.0 m。
+    private const val MIN_TRAVEL_TIME_SECONDS = 0.001 // 最小传播时间(s)，排除明显错误的时差。
+    private const val MAX_TRAVEL_TIME_SECONDS = 0.200 // 最大传播时间(s)，不是 PPP 残差门限。
+    private const val DOPPLER_PHASE_JUMP_METERS = 0.50 // 去系统公共项后的相位-多普勒差分门限(m)。
+    private const val CODE_JUMP_METERS = 30.0 // 去系统公共项后的码-多普勒跳变门限(m)。
+    private const val MW_JUMP_METERS = 5.0 // 双频 MW 组合相邻历元跳变门限(m)。
+    private const val MIN_COMMON_MODE_SIGNALS = 3 // 同系统至少 3 条创新量才求公共中位数。
+    private const val NEAR_ZERO = 0.0001 // 按当前观测数值单位判断近零/空值；不是统一的“0.1 mm”。
 
-    companion object {
-        private const val TAG = "RinexLogger"
-        private const val CLIGHT = 299792458.0
-        private const val NEAR_ZERO = 0.0001
-        private const val LEAP_SECOND = 18 // As of 2021/2026
+    /*
+     * 某些设备 FullBias 改变时不增加 HCDC：接收机时间会整体跳变，1 ms 对应约 300 km 伪距。
+     * 这里只归一化同一时钟产生的大跳变，不能用来删除单星真实异常或冻结 FullBias。
+     * HCDC 真正变化仍被标记为时钟不连续，并通知载波弧段重新开始。
+     */
+    private const val IMPLICIT_CLOCK_JUMP_NS = 50_000L       // 50 us
+    private const val MAX_CLOCK_EPOCH_GAP_NS = 5_000_000_000L // 5 s
 
-        // System Constants
-        private const val SYS_GPS = 1
-        private const val SYS_GLO = 3
-        private const val SYS_QZS = 4
-        private const val SYS_BDS = 5
-        private const val SYS_GAL = 6
-        private const val MAX_SYS = 10
-        private const val MAX_FRQ = 5
+    // 以下是 Android constellationType 编号，不是 RTKLIB SYS_* 的位掩码，禁止直接混用。
+    private const val SYS_GPS = 1
+    private const val SYS_GLO = 3
+    private const val SYS_GAL = 6
+    private const val SYS_BDS = 5
+    private const val SYS_QZS = 4
+    private const val MAX_FRQ = 5 // 每系统最多存 5 种“频段+属性”信号；不是 RTKLIB NFREQ 或物理频数。
 
-        // Measurement States
-        private const val STATE_CODE_LOCK = 1 // 2^0
-        private const val STATE_TOW_DECODED = 8 // 2^3
-        private const val STATE_MSEC_AMBIGUOUS = 16 // 2^4
-        private const val STATE_GLO_TOD_DECODED = 128 // 2^7
-        private const val STATE_GAL_E1C_2ND_CODE_LOCK = 2048 // 2^11
-        private const val STATE_GAL_E1BC_CODE_LOCK = 1024 // 2^10
+    // State 为位掩码：CODE_LOCK=码锁定；TOW=周内时已解码/已知；GLO TOD=日内时。
+    // 测试某一位用 (state and mask)!=0，不能用 state==mask（可能同时有多个状态）。
+    private const val STATE_CODE_LOCK = 1
+    private const val STATE_TOW_DECODED = 8
+    private const val STATE_GLO_STRING_SYNC = 64
+    private const val STATE_GLO_TOD_DECODED = 128
+    private const val STATE_TOW_KNOWN = 16384
+    private const val STATE_GLO_TOD_KNOWN_NEW = 32768
 
-        // ADR States
-        private const val ADR_STATE_VALID = 1
-        private const val ADR_STATE_RESET = 2
-        private const val ADR_STATE_CYCLE_SLIP = 4
-        private const val ADR_STATE_HALF_CYCLE_RESOLVED = 8
-        private const val ADR_STATE_HALF_CYCLE_REPORTED = 16
+    // ADR 状态与跟踪 State 分开：VALID=1、RESET=2、SLIP=4、半周已解决=8、已报告=16。
+    // LLI_SLIP 是输出 RINEX 的失锁/周跳位，不是 Android ADR_SLIP 的数值 4。
+    private const val GPS_ADR_STATE_CYCLE_SLIP = 4
+    private const val GPS_ADR_STATE_RESET = 2
+    private const val GPS_ADR_STATE_HALF_CYCLE_RESOLVED = 8
+    private const val GPS_ADR_STATE_HALF_CYCLE_REPORTED = 16
+    private const val LLI_SLIP = 0x01
 
-        // LLI Flags
-        private const val LLI_SLIP = 0x01
-        private const val LLI_HALFC = 0x02
-        private const val LLI_BOCTRK = 0x04
-
-        // Thresholds
-        private const val MAXPRRUNCMPS = 10.0
-        private const val MAXTOWUNCNS = 500.0
-        private const val MAXADRUNCNS = 1.0
+    /** 一条 Raw 信号的中间结构，仍保持 Android 原始单位，尚未转换成 RINEX 观测。 */
+    class GnssSat {
+        var timeNanos: Long = 0 // 硬件时钟(ns)，TXT[2]。
+        var fullBiasNanos: Long = 0 // GPST 大整数钟偏(ns)，TXT[5]。
+        var biasNanos: Double = 0.0 // 精细钟偏(ns)，TXT[6]。
+        var hardwareClockDiscontinuityCount: Int = 0 // 硬件时钟不连续计数，TXT[10]。
+        var svid: Int = 0 // 星座内卫星号，TXT[11]；QZSS 识别时作编号归一化。
+        var timeOffsetNanos: Double = 0.0 // 信号测量相对 Clock 的偏移(ns)，TXT[12]。
+        var state: Int = 0 // 跟踪/时标状态位，TXT[13]。
+        var receivedSvTimeNanos: Long = 0 // 卫星信号发射时标(ns)，TXT[14]。
+        var receivedSvTimeUncertaintyNanos: Long = 0 // 发射时标 1σ(ns)，TXT[15]。
+        var cn0DbHz: Double = 0.0 // C/N0(dB-Hz)，TXT[16]。
+        var pseudorangeRateMps: Double = 0.0 // 伪距率(m/s)，TXT[17]。
+        var pseudorangeRateUncertaintyMps: Double = 0.0 // 伪距率 1σ(m/s)，TXT[18]。
+        var adrState: Int = 0 // ADR 有效/重置/周跳/半周状态，TXT[19]。
+        var adrMeters: Double = 0.0 // 累计距离(m)，TXT[20]，用于生成 L。
+        var adrUncertaintyMeters: Double = 0.0 // ADR 1σ(m)，TXT[21]。
+        var carrierFrequencyHz: Double = 0.0 // 报告载频(Hz)，TXT[22]。
+        var multipathIndicator: Int = 0 // 多路径枚举，TXT[26]；当前只解析，不按此删除观测。
+        var constellationType: Int = 0 // Android 星座编号，TXT[28]。
+        var codeType: String = "" // 信号属性，TXT[35]；仅 C/Q 等单字母不能单独表示频段。
+        var sys: Int = 0 // 识别后的本转换器星座编号，当前沿用 Android 数值。
+        var signalName: String = "" // 识别后的 RINEX 信号，如 1C/5Q；空表示未识别。
+        // 累计静默钟跳修正(ns)：从 Time-FullBias 中减去，整历元所有信号使用同一个值。
+        var receiverClockCorrectionNanos: Long = 0L
     }
 
-    private var mRinexFile: File? = null
-    private var mTempBodyFile: File? = null
-    private var mBodyWriter: BufferedWriter? = null
-    private var mIsLogging = false
-
-    // Accumulated data for Header
-    private val mSignals = Array(MAX_SYS) { Array(MAX_FRQ) { "" } }
-    private val mNumSignals = IntArray(MAX_SYS)
-    private val mGlonassFreqMap = HashMap<Int, Int>()
-
-    // Reference Clock State for Continuity
-    private var mLastHwClockDiscontinuityCount = -1
-    private var mRefFullBiasNanos: Long = 0
-    private var mRefBiasNanos = 0.0
-
-    // First Observation Time (High Precision)
-    private var mFirstObsTime: RinexTime? = null
-    private var mFirstObsSet = false
-
-    // Track last observation time for duration
-    private var mLastObsTime: RinexTime? = null
-
-    // Previous Epoch for Galileo check
-    private var mPreviousEpochSats = mutableListOf<RnxSat>()
-    private var mPreviousEpochTimeMillis: Long = -1
-
-    // Position
-    private var mApproxPos = doubleArrayOf(0.0, 0.0, 0.0)
-
-    // Naming components for output file
-    private var mStationName = "GNSS00GEO"
-    private var mSource = "R"   // receiver
-    private var mFru = "01S"    // sampling interval
-    private var mType = "MO"    // data type
-    private var mStartTimeStr = "" // YYYYDDDHHMM
-
-    // Configurable header fields
-    private var mMarkerName = "GeoLog"
-    private var mMarkerNumber = "Unknown"
-    private var mMarkerType = "GEODETIC"
-    private var mObserver = "SWJTU"
-    private var mAgency = "SWJTU"
-    private var mReceiverNumber = "Unknown"
-    private var mReceiverType = "${Build.MANUFACTURER} ${Build.MODEL}"
-    private var mReceiverVersion = Build.VERSION.RELEASE
-    private var mAntennaNumber = "unknown"
-    private var mAntennaType = "unknown"
-    private var mAntennaDeltaH = 0.0
-    private var mAntennaDeltaE = 0.0
-    private var mAntennaDeltaN = 0.0
-
-    class HeaderSettings {
-        var stationName: String? = null
-        var markerName: String? = null
-        var markerNumber: String? = null
-        var markerType: String? = null
-        var observer: String? = null
-        var agency: String? = null
-        var receiverNumber: String? = null
-        var receiverType: String? = null
-        var receiverVersion: String? = null
-        var antennaNumber: String? = null
-        var antennaType: String? = null
-        var antennaDeltaH: Double = 0.0
-        var antennaDeltaE: Double = 0.0
-        var antennaDeltaN: Double = 0.0
+    /** 一颗卫星在一个历元的多信号观测；数组下标由 signalMap 决定，不是固定 F1/F2/F3 槽。 */
+    class RnxSat(val sys: Int, val prn: Int) {
+        val p = DoubleArray(MAX_FRQ) // RINEX C 码观测，单位 m；0 在本实现中表示缺失。
+        val l = DoubleArray(MAX_FRQ) // RINEX L 相位，单位 cycle；ADR/λ，不从旧 CarrierPhase 得到。
+        val d = DoubleArray(MAX_FRQ) // RINEX D 多普勒，单位 Hz；-PRR/λ。
+        val s = DoubleArray(MAX_FRQ) // RINEX S 载噪比，单位 dB-Hz，不是 SnrInDb。
+        val lli = IntArray(MAX_FRQ) // 相位失锁标志位，非相位质量评分。
+        val frequencyHz = DoubleArray(MAX_FRQ) // 名义载频(Hz)，用于波长和双频组合。
+        // 没有 P/L 的卫星不输出，即便只带 D/S；这影响最终文件中的观测数量。
+        fun isEmpty(): Boolean = p.all { it == 0.0 } && l.all { it == 0.0 }
     }
 
-    private class RinexTime(
-        val year: Int, val month: Int, val day: Int, val hour: Int, val min: Int, val sec: Double
-    ) {
-        fun toRoughMillis(): Long {
-            val cal = Calendar.getInstance(TimeZone.getTimeZone("UTC"))
-            cal.set(year, month - 1, day, hour, min, sec.toInt())
-            return cal.timeInMillis
-        }
+    class RnxEpoch {
+        var time = DoubleArray(6) // GPST 日历表示：[年,月,日,时,分,秒(可含小数)]。
+        var receiverTimeNanos: Long = 0L // 去静默钟跳后的接收机时间(ns)，供相邻历元 dt 使用。
+        val sats = mutableListOf<RnxSat>()
+        var clockDiscontinuity = false // 整历元时钟中断标记，finishEpoch 将其传播到各信号 LLI。
     }
 
-    private class RnxSat(val sys: Int, val prn: Int) {
-        val p = DoubleArray(MAX_FRQ)
-        val l = DoubleArray(MAX_FRQ)
-        val d = DoubleArray(MAX_FRQ)
-        val s = DoubleArray(MAX_FRQ)
-        val lli = IntArray(MAX_FRQ)
-    }
+    /**
+     * 转换诊断计数，不等于 PPP 实际使用计数。codeAccepted/phaseAccepted/dopplerAccepted
+     * 在初次赋值时递增：重复信号覆盖、预处理删码、最终空卫星过滤以后，实际写出数可更少。
+     * dopplerSlipDetected/MW/ADR 是不同检测来源，不能直接相加当作独立周跳总数。
+     */
+    data class ConversionStats(
+        var rawMeasurements: Int = 0, // parseLine 成功的 Raw 行数，不含无法解析的行。
+        var unsupportedSignals: Int = 0, // 后续名义频率/GLO 编号拒绝数，不涵盖全部未识别情况。
+        var invalidTracking: Int = 0, // 基础身份/频率/CN0 检查失败数，可包含未识别信号。
+        var codeAccepted: Int = 0, // 初次通过 P 检查并赋值的次数。
+        var phaseAccepted: Int = 0, // 初次通过 L 检查并赋值的次数。
+        var dopplerAccepted: Int = 0, // 初次通过 D 检查并赋值的次数。
+        var codeJumpRejected: Int = 0, // 多普勒预测码跳检测删除 P 的次数。
+        var dopplerSlipDetected: Int = 0, // 相位-多普勒检测新置周跳的次数。
+        var mwSlipDetected: Int = 0, // MW 双频组合跳变的对数，每次影响两个 LLI。
+        var adrStateSlip: Int = 0, // ADR 状态引起且当历元有 L 的失锁标记次数。
+        var clockDiscontinuityEpochs: Int = 0 // finishEpoch 标记时钟中断的历元数。
+    )
 
-    init {
-        resetSignals()
-    }
+    var lastStats = ConversionStats()
+        private set
 
-    fun applyHeaderSettings(settings: HeaderSettings?) {
-        if (settings == null) return
-        mStationName = normalizeStationName(settings.stationName)
-        mMarkerName = trimOrDefault(settings.markerName, "GeoLog")
-        mMarkerNumber = trimOrDefault(settings.markerNumber, "Unknown")
-        mMarkerType = trimOrDefault(settings.markerType, "GEODETIC")
-        mObserver = trimOrDefault(settings.observer, "SWJTU")
-        mAgency = trimOrDefault(settings.agency, "SWJTU")
-        mReceiverNumber = trimOrDefault(settings.receiverNumber, "Unknown")
-        mReceiverType = trimOrDefault(settings.receiverType, "${Build.MANUFACTURER} ${Build.MODEL}")
-        mReceiverVersion = trimOrDefault(settings.receiverVersion, Build.VERSION.RELEASE)
-        mAntennaNumber = trimOrDefault(settings.antennaNumber, "unknown")
-        mAntennaType = trimOrDefault(settings.antennaType, "unknown")
-        mAntennaDeltaH = settings.antennaDeltaH
-        mAntennaDeltaE = settings.antennaDeltaE
-        mAntennaDeltaN = settings.antennaDeltaN
-    }
+    // 历史按“星座+卫星+信号下标”隔离，避免把同星不同载频的相位当作连续弧段。
+    private data class SignalKey(val sys: Int, val prn: Int, val signal: Int)
+    private data class SignalHistory(
+        val timeNanos: Long,
+        val codeMeters: Double,
+        val phaseCycles: Double,
+        val dopplerHz: Double,
+        val frequencyHz: Double
+    )
+    private data class Innovation(val sat: RnxSat, val signal: Int, val value: Double)
 
-    private fun normalizeStationName(stationName: String?): String {
-        val fallback = "GNSS00GEO"
-        if (stationName == null) return fallback
-        val cleaned = stationName.trim().uppercase(Locale.US).replace("[^A-Z0-9]".toRegex(), "")
-        if (cleaned.length < 4) return fallback
-        if (cleaned.length > 9) return cleaned.substring(0, 9)
-        if (cleaned.length < 9) return String.format(Locale.US, "%-9s", cleaned).replace(' ', '0')
-        return cleaned
-    }
+    // 五个系统 G/R/E/C/J 的观测类型表。信号如 1C：频段 1 + 属性 C；C1C/L1C 是不同观测量。
+    private val signalMap = Array(5) { mutableListOf<String>() }
+    private val glonassSlots = TreeMap<Int, Int>()
 
-    private fun trimOrDefault(value: String?, defaultValue: String): String {
-        if (value == null) return defaultValue
-        val trimmed = value.trim()
-        return if (trimmed.isEmpty()) defaultValue else trimmed
-    }
+    // 仅用于 RINEX 文件头，不是定位真值约束；approxPos 为 ECEF X/Y/Z(m)，不是经纬高。
+    // antennaDelta 为 H/E/N(m)，不能误当 X/Y/Z；当前默认全零表示未设置这些元数据。
+    var markerName = "GNSSLOG"
+    var observer = "SWJTU"
+    var agency = "SWJTU"
+    var approxPos = doubleArrayOf(0.0, 0.0, 0.0)
+    var antennaDelta = doubleArrayOf(0.0, 0.0, 0.0)
 
-    private fun fitField(value: String?, width: Int, defaultValue: String): String {
-        val v = trimOrDefault(value, defaultValue)
-        return if (v.length > width) v.substring(0, width) else v
-    }
+    /**
+     * @param inputFile 已停止记录的本项目 54 列 Raw TXT；# 行跳过，不读取 RINEX/导航产品。
+     * @param outputFile 目标 OBS 文件，FileWriter 将覆盖同名内容；调用前应留存需保留的旧结果。
+     * @return 文件成功写出为 true；不表示观测精度合格或 PPP 已成功。
+     */
+    fun convert(inputFile: File, outputFile: File): Boolean {
+        signalMap.forEach { it.clear() }
+        glonassSlots.clear()
+        lastStats = ConversionStats()
+        val rawEpochs = mutableListOf<GnssSat>()
 
-    private fun resetSignals() {
-        for (i in 0 until MAX_SYS) {
-            mSignals[i].fill("")
-            mNumSignals[i] = 0
-        }
-        mGlonassFreqMap.clear()
-        mFirstObsSet = false
-        mFirstObsTime = null
-        mLastObsTime = null
-        mStartTimeStr = ""
-        mLastHwClockDiscontinuityCount = -1
-    }
-
-    fun startNewLog(baseDirectory: File, stationName: String?, logDate: Date) {
-        if (mIsLogging) {
-            stopLog()
-        }
-        resetSignals()
-        val rinexDir = File(baseDirectory, "RINEX")
-        if (!rinexDir.exists() && !rinexDir.mkdirs()) {
-            Log.e(TAG, "Failed to create RINEX directory")
-            return
-        }
-
-        mStationName = normalizeStationName(mStationName)
-        mSource = "R"
-        mFru = "01S"
-        mType = "MO"
-
-        val cal = Calendar.getInstance(TimeZone.getTimeZone("UTC"))
-        cal.time = logDate
-        val year = cal.get(Calendar.YEAR)
-        val doy = cal.get(Calendar.DAY_OF_YEAR)
-        val hour = cal.get(Calendar.HOUR_OF_DAY)
-        val minute = cal.get(Calendar.MINUTE)
-        mStartTimeStr = String.format(Locale.US, "%04d%03d%02d%02d", year, doy, hour, minute)
-
-        val placeholderName = String.format(Locale.US, "%s_%s_%s_%s_%s_%s.%s",
-            mStationName, mSource, mStartTimeStr, "XX", mFru, mType, "rnx")
-        mRinexFile = File(rinexDir, placeholderName)
-        mTempBodyFile = File(rinexDir, "$placeholderName.tmp")
-
+        Log.d(TAG, "开始读取原始数据: ${inputFile.name}")
         try {
-            mBodyWriter = BufferedWriter(FileWriter(mTempBodyFile))
-            mIsLogging = true
-        } catch (e: IOException) {
-            Log.e(TAG, "Failed to open RINEX temp file", e)
-        }
-    }
-
-    fun stopLog() {
-        if (!mIsLogging) return
-        mIsLogging = false
-
-        try {
-            mBodyWriter?.close()
-
-            if (mRinexFile != null && mTempBodyFile != null && mTempBodyFile!!.exists()) {
-                var durationStr = "00S"
-                if (mFirstObsTime != null && mLastObsTime != null) {
-                    var diff = mLastObsTime!!.toRoughMillis() - mFirstObsTime!!.toRoughMillis()
-                    if (diff < 0) diff = 0
-                    if (diff >= 86400000L) {
-                        val days = Math.round(diff / 86400000.0).toInt()
-                        durationStr = String.format(Locale.US, "%02dD", days)
-                    } else if (diff >= 3600000L) {
-                        val hrs = Math.round(diff / 3600000.0).toInt()
-                        durationStr = String.format(Locale.US, "%02dH", hrs)
-                    } else if (diff >= 60000L) {
-                        val mins = Math.round(diff / 60000.0).toInt()
-                        durationStr = String.format(Locale.US, "%02dM", mins)
-                    } else {
-                        var secs = Math.round(diff / 1000.0).toInt()
-                        if (secs == 0) secs = 1
-                        durationStr = String.format(Locale.US, "%02dS", secs)
-                    }
-                }
-
-                val finalName = String.format(Locale.US, "%s_%s_%s_%s_%s_%s.rnx",
-                    mStationName, mSource, mStartTimeStr, durationStr, mFru, mType)
-                val finalFile = File(mRinexFile!!.parentFile, finalName)
-
-                val finalWriter = BufferedWriter(FileWriter(finalFile))
-                writeHeader(finalWriter)
-
-                val bodyReader = BufferedReader(FileReader(mTempBodyFile))
+            BufferedReader(FileReader(inputFile)).use { reader ->
                 var line: String?
-                while (bodyReader.readLine().also { line = it } != null) {
-                    finalWriter.write(line)
-                    finalWriter.newLine()
-                }
-                bodyReader.close()
-                finalWriter.close()
-
-                mTempBodyFile!!.delete()
-                mRinexFile = finalFile
-            }
-        } catch (e: IOException) {
-            Log.e(TAG, "Error finalizing RINEX file", e)
-        }
-    }
-
-    fun updateLocation(location: Location?) {
-        if (location != null && mIsLogging) {
-            val xyz = latLonHToXyz(location.latitude, location.longitude, location.altitude)
-            mApproxPos = xyz
-        }
-    }
-
-    fun processGnssMeasurements(event: GnssMeasurementsEvent) {
-        if (!mIsLogging || mBodyWriter == null) return
-
-        val clock = event.clock
-        val discontinuityCount = clock.hardwareClockDiscontinuityCount
-
-        if (mLastHwClockDiscontinuityCount == -1 || discontinuityCount != mLastHwClockDiscontinuityCount) {
-            mLastHwClockDiscontinuityCount = discontinuityCount
-            mRefFullBiasNanos = clock.fullBiasNanos
-            mRefBiasNanos = if (clock.hasBiasNanos()) clock.biasNanos else 0.0
-        }
-
-        if (!mFirstObsSet) {
-            val timeNanos = clock.timeNanos
-            mFirstObsTime = calculateRinexTime(timeNanos, mRefFullBiasNanos, mRefBiasNanos)
-            mFirstObsSet = true
-        }
-
-        processEpoch(clock, event.measurements)
-    }
-
-    private fun processEpoch(clock: GnssClock, measurements: Collection<GnssMeasurement>) {
-        val timeNanos = clock.timeNanos
-        val epochTime = calculateRinexTime(timeNanos, mRefFullBiasNanos, mRefBiasNanos)
-        val currentEpochMillis = epochTime.toRoughMillis()
-
-        val epochSats = mutableListOf<RnxSat>()
-
-        var checkGalileo4ms = false
-        if (mPreviousEpochTimeMillis != -1L) {
-            val diff = abs(currentEpochMillis - mPreviousEpochTimeMillis)
-            if (abs(diff - 1000) < 100) {
-                checkGalileo4ms = true
-            }
-        }
-
-        for (m in measurements) {
-            val constType = m.constellationType
-            val sysId = getSystemId(constType)
-            if (sysId == -1) continue
-
-            var rawCodeType = ""
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                if (m.hasCodeType()) {
-                    rawCodeType = m.codeType
-                }
-            }
-            val signalName = getSmartSignalCode(sysId, m.carrierFrequencyHz.toDouble(), rawCodeType)
-
-            if (signalName.isNullOrEmpty()) continue
-
-            if (sysId == SYS_GLO) {
-                val svid = m.svid
-                val k = calculateGlonassSlot(m.carrierFrequencyHz.toDouble())
-                if (k != null) {
-                    mGlonassFreqMap[svid] = k
-                }
-            }
-
-            val freqIndex = registerSignal(sysId, signalName)
-            if (freqIndex == -1) continue
-
-            if (!isMeasurementValid(m, sysId, signalName)) continue
-
-            val rawCarrierFreqHz = m.carrierFrequencyHz.toDouble()
-            if (rawCarrierFreqHz == 0.0) continue
-
-            val nominalFreq = getNominalFrequency(sysId, rawCarrierFreqHz, m.svid)
-            val wavl = CLIGHT / nominalFreq
-
-            val prSeconds = calculatePseudorangeSeconds(clock, m, sysId, mRefFullBiasNanos, mRefBiasNanos)
-            if (prSeconds < 0 || prSeconds > 0.5) continue
-
-            val pseudoRange = prSeconds * CLIGHT
-            val accumulatedDeltaRange = m.accumulatedDeltaRangeMeters
-            var carrierPhase = accumulatedDeltaRange / wavl
-            val doppler = -m.pseudorangeRateMetersPerSecond / wavl
-            val cno = m.cn0DbHz
-            val adrState = m.accumulatedDeltaRangeState
-
-            if ((adrState and ADR_STATE_VALID) == 0) {
-                carrierPhase = 0.0
-            }
-
-            val sat = findOrCreateSat(epochSats, sysId, m.svid)
-            sat.p[freqIndex] = pseudoRange
-            sat.l[freqIndex] = carrierPhase
-            sat.d[freqIndex] = doppler
-            sat.s[freqIndex] = cno
-
-            sat.lli[freqIndex] = 0
-            if ((adrState and ADR_STATE_HALF_CYCLE_REPORTED) != 0 && (adrState and ADR_STATE_HALF_CYCLE_RESOLVED) == 0) {
-                sat.lli[freqIndex] = sat.lli[freqIndex] or LLI_HALFC
-            }
-            if ((adrState and ADR_STATE_RESET) != 0 || (adrState and ADR_STATE_CYCLE_SLIP) != 0) {
-                sat.lli[freqIndex] = sat.lli[freqIndex] or LLI_SLIP
-            }
-        }
-
-        // Galileo 4ms correction
-        if (checkGalileo4ms && mPreviousEpochSats.isNotEmpty()) {
-            val range4ms = 0.004 * CLIGHT
-            val threshold = 1500.0
-
-            for (sat in epochSats) {
-                if (sat.sys == SYS_GAL) {
-                    var prevSat: RnxSat? = null
-                    for (p in mPreviousEpochSats) {
-                        if (p.sys == SYS_GAL && p.prn == sat.prn) {
-                            prevSat = p
-                            break
-                        }
-                    }
-                    if (prevSat == null) continue
-
-                    for (i in 0 until MAX_FRQ) {
-                        val pCurr = sat.p[i]
-                        val pPrev = prevSat.p[i]
-
-                        if (pCurr != 0.0 && pPrev != 0.0) {
-                            if (abs(pCurr - pPrev - range4ms) < threshold ||
-                                abs(pCurr - pPrev + range4ms) < threshold) {
-                                val sign = if ((pCurr - pPrev) < 0) -1 else 1
-                                sat.p[i] = sat.p[i] - sign * range4ms
-                            }
+                while (reader.readLine().also { line = it } != null) {
+                    if (line!!.startsWith("Raw")) {
+                        val sat = parseLine(line!!)
+                        if (sat != null) {
+                            rawEpochs.add(sat)
+                            lastStats.rawMeasurements++
                         }
                     }
                 }
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "读取原始观测失败", e)
+            return false
         }
 
-        if (epochSats.isNotEmpty()) {
-            try {
-                mLastObsTime = epochTime
-                writeEpoch(epochTime, epochSats)
-                mPreviousEpochSats = epochSats
-                mPreviousEpochTimeMillis = currentEpochMillis
-            } catch (e: IOException) {
-                Log.e(TAG, "Error writing epoch", e)
+        if (rawEpochs.isEmpty()) return false
+        // 必须先扫描所有 Raw 以确定头部 SYS / # / OBS TYPES，再按时间组织观测。
+        identifySignals(rawEpochs)
+        signalMap.forEach { signals -> signals.sortWith(compareBy({ it[0] }, { it[1] })) }
+        val rinexEpochs = processEpochs(rawEpochs)
+        if (rinexEpochs.isEmpty()) return false
+        preprocessRinexEpochs(rinexEpochs)
+        val success = writeRinexFile(outputFile, rinexEpochs)
+        Log.i(TAG, "转换统计: $lastStats")
+        return success
+    }
+
+    /**
+     * 依文件原顺序处理（不先排序）；校正后的接收机时间差 >100 ms 时切分历元。
+     * 同历元内按 sys+PRN 合并多信号；同一信号重复时后面的有效赋值可覆盖前值，
+     * 并非实时 adapter 的“signal policy 优先，再按质量选择”策略。
+     */
+    private fun processEpochs(rawList: List<GnssSat>): List<RnxEpoch> {
+        val rinexEpochs = mutableListOf<RnxEpoch>()
+        var currentEpoch = RnxEpoch()
+        var lastTimeMillis = correctedReceiverTimeNanos(rawList[0]) / 1_000_000L
+
+        var lastClockDiscontinuityCount: Int? = null
+        var activeClockTimeNanos = Long.MIN_VALUE
+        var lastClockTimeNanos = Long.MIN_VALUE
+        var lastRawReceiverTimeNanos = 0L
+        var clockCorrectionNanos = 0L
+        var syntheticClockDiscontinuity = false
+        val lastAdrState = mutableMapOf<SignalKey, Int>()
+        val pendingAdrSlip = mutableSetOf<SignalKey>()
+
+        for (obs in rawList) {
+            /*
+             * 一个 Clock 对应多个信号行；以 TimeNanos 的变化判定新 Clock，钟跳只计算一次。
+             * step=(当前原始接收机时差)-(硬件 TimeNanos 时差)，累计 correction 让历元连续。
+             * 触发条件：HCDC 未变、间隔 0～5 s、|step|>=50 μs；不是对所有钟偏作平滑。
+             */
+            if (obs.timeNanos != activeClockTimeNanos) {
+                val rawReceiverTimeNanos = obs.timeNanos - obs.fullBiasNanos
+                val hcdcChanged = lastClockDiscontinuityCount != null &&
+                    obs.hardwareClockDiscontinuityCount != lastClockDiscontinuityCount
+                syntheticClockDiscontinuity = false
+
+                if (lastClockTimeNanos != Long.MIN_VALUE) {
+                    val elapsedNanos = obs.timeNanos - lastClockTimeNanos
+                    val rawReceiverDelta = rawReceiverTimeNanos - lastRawReceiverTimeNanos
+                    val clockStepNanos = rawReceiverDelta - elapsedNanos
+
+                    if (!hcdcChanged && elapsedNanos in 1..MAX_CLOCK_EPOCH_GAP_NS &&
+                        abs(clockStepNanos) >= IMPLICIT_CLOCK_JUMP_NS) {
+                        clockCorrectionNanos += clockStepNanos
+                        syntheticClockDiscontinuity = true
+                        Log.w(TAG, "Normalized unreported GnssClock step: " +
+                            "step=${clockStepNanos}ns, correction=${clockCorrectionNanos}ns, " +
+                            "timeNanos=${obs.timeNanos}")
+                    }
+                }
+                activeClockTimeNanos = obs.timeNanos
+                lastClockTimeNanos = obs.timeNanos
+                lastRawReceiverTimeNanos = rawReceiverTimeNanos
+            }
+            obs.receiverClockCorrectionNanos = clockCorrectionNanos
+            val currentTimeMillis = correctedReceiverTimeNanos(obs) / 1_000_000L
+
+            // 历元切分，放宽阈值至 100ms 防止同秒数据被切碎
+            if (abs(currentTimeMillis - lastTimeMillis) > 100) {
+                if (currentEpoch.sats.isNotEmpty()) {
+                    finishEpoch(currentEpoch)
+                    rinexEpochs.add(currentEpoch)
+                }
+                currentEpoch = RnxEpoch()
+                lastTimeMillis = currentTimeMillis
+            }
+
+            if (lastClockDiscontinuityCount != null &&
+                obs.hardwareClockDiscontinuityCount != lastClockDiscontinuityCount) {
+                currentEpoch.clockDiscontinuity = true
+            }
+            if (syntheticClockDiscontinuity) {
+                currentEpoch.clockDiscontinuity = true
+            }
+            lastClockDiscontinuityCount = obs.hardwareClockDiscontinuityCount
+
+            currentEpoch.time = getRinexTime(obs)
+            currentEpoch.receiverTimeNanos = correctedReceiverTimeNanos(obs)
+
+            if (!isTrackingUsable(obs)) {
+                lastStats.invalidTracking++
+                continue
+            }
+
+            var sat = currentEpoch.sats.find { it.sys == obs.sys && it.prn == obs.svid }
+            if (sat == null) {
+                sat = RnxSat(obs.sys, obs.svid)
+                currentEpoch.sats.add(sat)
+            }
+
+            val freqIdx = getSignalIndex(obs.sys, obs.signalName)
+            if (freqIdx !in 0 until MAX_FRQ) continue
+
+            val nominalFreq = getNominalFrequency(obs.sys, obs.carrierFrequencyHz, obs.svid)
+            if (nominalFreq == 0.0) {
+                lastStats.unsupportedSignals++
+                continue
+            }
+            val lambda = CLIGHT / nominalFreq // 波长(m/cycle)，用名义频率避免报告载频微小偏差累积。
+            sat.frequencyHz[freqIdx] = nominalFreq
+
+            if (obs.sys == SYS_GLO && obs.svid > 80) {
+                lastStats.unsupportedSignals++
+                continue
+            }
+
+            // P/L/D 分别判有效：P 需要码锁及明确发射时标，D 看 PRR，L 看 ADR 状态。
+            // TOW 暂时不可用不自动删除有效 L；没有合法 P 则保持空，不根据 L 编造码观测。
+            if (isCodeValid(obs)) {
+                val prSeconds = calculatePrecisePseudorangeSeconds(obs)
+                if (prSeconds in MIN_TRAVEL_TIME_SECONDS..MAX_TRAVEL_TIME_SECONDS) {
+                    sat.p[freqIdx] = prSeconds * CLIGHT
+                    lastStats.codeAccepted++
+                }
+            }
+            if (isDopplerValid(obs)) {
+                sat.d[freqIdx] = -obs.pseudorangeRateMps / lambda
+                lastStats.dopplerAccepted++
+            }
+            val key = SignalKey(obs.sys, obs.svid, freqIdx)
+            val rawAdrSlip = (obs.adrState and
+                (GPS_ADR_STATE_CYCLE_SLIP or GPS_ADR_STATE_RESET)) != 0
+            // 离线路径 RESET/SLIP 当历元 L 无效，先记 pending；恢复有效 L 时补 LLI_SLIP。
+            if (rawAdrSlip) pendingAdrSlip.add(key)
+
+            if (isPhaseValid(obs)) {
+                sat.l[freqIdx] = obs.adrMeters / lambda
+                lastStats.phaseAccepted++
+                if (pendingAdrSlip.remove(key)) {
+                    sat.lli[freqIdx] = sat.lli[freqIdx] or LLI_SLIP
+                }
+            }
+            sat.s[freqIdx] = obs.cn0DbHz // 严格使用载噪比字段
+
+            val previousAdrState = lastAdrState[key]
+            val adrValid = (obs.adrState and 1) != 0
+            val previousAdrValid = previousAdrState?.let { (it and 1) != 0 }
+            val halfCycleUnresolved =
+                (obs.adrState and GPS_ADR_STATE_HALF_CYCLE_REPORTED) != 0 &&
+                    (obs.adrState and GPS_ADR_STATE_HALF_CYCLE_RESOLVED) == 0
+            val previousHalfCycleUnresolved = previousAdrState?.let {
+                (it and GPS_ADR_STATE_HALF_CYCLE_REPORTED) != 0 &&
+                    (it and GPS_ADR_STATE_HALF_CYCLE_RESOLVED) == 0
+            }
+            if (previousAdrValid != null && previousAdrValid != adrValid &&
+                abs(sat.l[freqIdx]) > NEAR_ZERO) {
+                sat.lli[freqIdx] = sat.lli[freqIdx] or LLI_SLIP
+            }
+            // 本离线实现仅在半周未解决状态发生变化时置 LLI_SLIP；稳定未解决不每秒写 LLI=2。
+            // 实时 adapter 当前会设置 LLI_HALFC，规则不同，需用 obs dump 检验，不能推断等价。
+            if (previousHalfCycleUnresolved != null &&
+                previousHalfCycleUnresolved != halfCycleUnresolved &&
+                abs(sat.l[freqIdx]) > NEAR_ZERO) {
+                sat.lli[freqIdx] = sat.lli[freqIdx] or LLI_SLIP
+            }
+            if ((sat.lli[freqIdx] and LLI_SLIP) != 0 &&
+                abs(sat.l[freqIdx]) > NEAR_ZERO) {
+                lastStats.adrStateSlip++
+            }
+            lastAdrState[key] = obs.adrState
+        }
+
+        if (currentEpoch.sats.isNotEmpty()) {
+            finishEpoch(currentEpoch)
+            rinexEpochs.add(currentEpoch)
+        }
+        return rinexEpochs
+    }
+
+    // HCDC 或合成钟跳影响整个历元，给当历元所有非空相位置失锁位，防止跨钟跳沿用模糊度。
+    private fun finishEpoch(epoch: RnxEpoch) {
+        if (!epoch.clockDiscontinuity) return
+        lastStats.clockDiscontinuityEpochs++
+        epoch.sats.forEach { sat ->
+            for (i in 0 until MAX_FRQ) {
+                if (abs(sat.l[i]) > NEAR_ZERO) sat.lli[i] = sat.lli[i] or LLI_SLIP
             }
         }
     }
 
-    private fun calculateRinexTime(timeNanos: Long, fullBiasNanos: Long, biasNanos: Double): RinexTime {
-        val gpsTimeNanos = timeNanos - fullBiasNanos - biasNanos.toLong()
-        val gpsTimeMillis = gpsTimeNanos / 1000000L
-        val gpsEpochMillis = 315964800000L // Jan 6 1980
-        val rinexTimeMillis = gpsEpochMillis + gpsTimeMillis
+    /**
+     * 在 RINEX 观测域作因果预处理：只用当前与历史历元，不用未来观测。
+     * 包括相位-多普勒一致性、码-多普勒跳变和 MW 双频周跳；不执行伪距平滑。
+     * 时间间隔只接受 0.2～5.0 s；不足三条同系统创新量时跳过该系统公共项检测。
+     * 这些检测并非 PPP 后验残差抗差，两层处理不能混为一谈。
+     */
+    private fun preprocessRinexEpochs(epochs: List<RnxEpoch>) {
+        val history = mutableMapOf<SignalKey, SignalHistory>()
+        val mwHistory = mutableMapOf<SignalKey, Double>()
 
+        for (epoch in epochs) {
+            val phaseBySystem = mutableMapOf<Int, MutableList<Innovation>>()
+            val codeBySystem = mutableMapOf<Int, MutableList<Innovation>>()
+
+            for (sat in epoch.sats) {
+                for (k in 0 until MAX_FRQ) {
+                    val freq = sat.frequencyHz[k]
+                    if (freq <= 0.0) continue
+                    val key = SignalKey(sat.sys, sat.prn, k)
+                    val previous = history[key] ?: continue
+                    val dt = (epoch.receiverTimeNanos - previous.timeNanos) * 1e-9
+                    if (dt !in 0.2..5.0 || previous.frequencyHz <= 0.0) continue
+                    val lambda = CLIGHT / freq
+
+                    if (abs(sat.l[k]) > NEAR_ZERO &&
+                        abs(previous.phaseCycles) > NEAR_ZERO &&
+                        abs(sat.d[k]) > NEAR_ZERO &&
+                        abs(previous.dopplerHz) > NEAR_ZERO &&
+                        (sat.lli[k] and LLI_SLIP) == 0) {
+                        // D=-速度/λ，因此 ΔL + 平均D*dt 应接近零；乘 λ 得到米域创新量。
+                        val innovationMeters = (sat.l[k] - previous.phaseCycles +
+                            0.5 * (previous.dopplerHz + sat.d[k]) * dt) * lambda
+                        phaseBySystem.getOrPut(sat.sys) { mutableListOf() }
+                            .add(Innovation(sat, k, innovationMeters))
+                    }
+                    if (sat.p[k] > 0.0 && previous.codeMeters > 0.0 &&
+                        abs(sat.d[k]) > NEAR_ZERO &&
+                        abs(previous.dopplerHz) > NEAR_ZERO) {
+                        // 用梯形积分的 Doppler 预测当前 P，不将预测值写回观测，不是 Hatch 平滑。
+                        val predictedCode = previous.codeMeters -
+                            lambda * 0.5 * (previous.dopplerHz + sat.d[k]) * dt
+                        codeBySystem.getOrPut(sat.sys) { mutableListOf() }
+                            .add(Innovation(sat, k, sat.p[k] - predictedCode))
+                    }
+                }
+            }
+
+            for ((_, innovations) in phaseBySystem) {
+                if (innovations.size < MIN_COMMON_MODE_SIGNALS) continue
+                // 系统公共中位数用于减少接收机公共变化影响；单星偏离超过门限才标记。
+                val common = median(innovations.map { it.value })
+                for (item in innovations) {
+                    if (abs(item.value - common) <= DOPPLER_PHASE_JUMP_METERS) continue
+                    item.sat.lli[item.signal] = item.sat.lli[item.signal] or LLI_SLIP
+                    lastStats.dopplerSlipDetected++
+                }
+            }
+            for ((_, innovations) in codeBySystem) {
+                if (innovations.size < MIN_COMMON_MODE_SIGNALS) continue
+                val common = median(innovations.map { it.value })
+                for (item in innovations) {
+                    if (abs(item.value - common) <= CODE_JUMP_METERS) continue
+                    item.sat.p[item.signal] = 0.0
+                    lastStats.codeJumpRejected++
+                }
+            }
+
+            // MW 使用两个不同载频及相应 P/L，量纲为 m；与历史 MW 相差超过 5 m 时两信号置失锁。
+            // 手机码噪声会影响 MW，此规则不是“所有超过 5 m 的 P 都直接删除”。
+            for (sat in epoch.sats) {
+                val f0 = sat.frequencyHz[0]
+                if (f0 <= 0.0) continue
+                for (k in 1 until MAX_FRQ) {
+                    val fk = sat.frequencyHz[k]
+                    if (fk <= 0.0 || abs(f0 - fk) < 1.0 ||
+                        sat.p[0] <= 0.0 || sat.p[k] <= 0.0 ||
+                        abs(sat.l[0]) <= NEAR_ZERO || abs(sat.l[k]) <= NEAR_ZERO) continue
+                    val mw = (sat.l[0] - sat.l[k]) * CLIGHT / (f0 - fk) -
+                        (f0 * sat.p[0] + fk * sat.p[k]) / (f0 + fk)
+                    val key = SignalKey(sat.sys, sat.prn, k)
+                    val previousMw = mwHistory[key]
+                    if (previousMw != null &&
+                        (sat.lli[0] and LLI_SLIP) == 0 &&
+                        (sat.lli[k] and LLI_SLIP) == 0 &&
+                        abs(mw - previousMw) > MW_JUMP_METERS) {
+                        sat.lli[0] = sat.lli[0] or LLI_SLIP
+                        sat.lli[k] = sat.lli[k] or LLI_SLIP
+                        lastStats.mwSlipDetected++
+                    }
+                    mwHistory[key] = mw
+                }
+            }
+
+            for (sat in epoch.sats) for (k in 0 until MAX_FRQ) {
+                val freq = sat.frequencyHz[k]
+                if (freq <= 0.0) continue
+                history[SignalKey(sat.sys, sat.prn, k)] = SignalHistory(
+                    epoch.receiverTimeNanos, sat.p[k], sat.l[k], sat.d[k], freq
+                )
+            }
+        }
+    }
+
+    private fun median(values: List<Double>): Double {
+        if (values.isEmpty()) return 0.0
+        val sorted = values.sorted()
+        val middle = sorted.size / 2
+        return if (sorted.size % 2 == 1) sorted[middle]
+        else 0.5 * (sorted[middle - 1] + sorted[middle])
+    }
+
+    /**
+     * 返回传播时间(s)，调用方乘 c 得 P(m)。绝对 GPST 纳秒很大，先用 Long 求差/取模，
+     * 最后才转 Double，避免把 ~10^18 ns 直接转浮点导致精细时差丢失。
+     * 信号接收时刻加入 TimeOffsetNanos；当前 toLong 截掉其亚纳秒部分。
+     * GPS/GAL/QZS 用周内时，BDT=GPST-14 s，GLO 用 UTC+3 h 日内时，随后修正跨周/跨日。
+     */
+    private fun calculatePrecisePseudorangeSeconds(obs: GnssSat): Double {
+        val gpsTimeNanos = correctedReceiverTimeNanos(obs) + obs.timeOffsetNanos.toLong()
+        val tTxNanos = obs.receivedSvTimeNanos
+        val weekNanos = 604800L * 1000000000L
+        val dayNanos = 86400L * 1000000000L
+        var tRxModNanos = 0L
+
+        when (obs.sys) {
+            SYS_GPS, SYS_GAL, SYS_QZS -> tRxModNanos = gpsTimeNanos % weekNanos
+            SYS_BDS -> tRxModNanos = (gpsTimeNanos - 14000000000L) % weekNanos // BDS 差 14s
+            SYS_GLO -> tRxModNanos = (gpsTimeNanos % dayNanos) + (3 * 3600 - LEAP_SECOND) * 1000000000L
+        }
+
+        var flightTimeNanos = tRxModNanos - tTxNanos
+        val halfWeekNanos = 302400L * 1000000000L
+        val halfDayNanos = 43200L * 1000000000L
+
+        if (obs.sys != SYS_GLO) {
+            if (flightTimeNanos > halfWeekNanos) flightTimeNanos -= weekNanos
+            else if (flightTimeNanos < -halfWeekNanos) flightTimeNanos += weekNanos
+        } else {
+            if (flightTimeNanos > halfDayNanos) flightTimeNanos -= dayNanos
+            else if (flightTimeNanos < -halfDayNanos) flightTimeNanos += dayNanos
+        }
+        return (flightTimeNanos - obs.biasNanos) * 1e-9
+    }
+
+    /** 写出 RINEX 3.05：头标签从第 61 列起；C/L/D/S 均按 signalMap 顺序写。 */
+    private fun writeRinexFile(file: File, epochs: List<RnxEpoch>): Boolean {
+        try {
+            BufferedWriter(FileWriter(file)).use { writer ->
+                writer.write(pad60("     3.05           OBSERVATION DATA    M: Mixed") + "RINEX VERSION / TYPE\n")
+
+                val sdf = SimpleDateFormat("yyyyMMdd HHmmss", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }
+                val manufacturer = android.os.Build.MANUFACTURER ?: "UNKNOWN"
+                val androidVersion = android.os.Build.VERSION.RELEASE ?: "UNKNOWN"
+                val runByDate = String.format("%-20s%-20s%s UTC", "GeoLogKt", manufacturer, sdf.format(Date()))
+                writer.write(pad60(runByDate) + "PGM / RUN BY / DATE\n")
+
+                // 头部设备、测站、天线信息为元数据；UNKNOWN 表示未提供真实天线型号。
+                writer.write(pad60(markerName) + "MARKER NAME\n")
+                writer.write(pad60("UNKNOWN") + "MARKER NUMBER\n")
+                writer.write(pad60("GEODETIC") + "MARKER TYPE\n")
+                writer.write(String.format(Locale.US, "%-20s%-40s", observer, agency) + "OBSERVER / AGENCY\n")
+
+                val recInfo = String.format("%-20s%-20s%-20s", "000001", "Generic Device", androidVersion)
+                writer.write(pad60(recInfo) + "REC # / TYPE / VERS\n")
+                writer.write(pad60("UNKNOWN") + "ANT # / TYPE\n")
+
+                writer.write(String.format(Locale.US, "%14.4f%14.4f%14.4f                  ", approxPos[0], approxPos[1], approxPos[2]) + "APPROX POSITION XYZ\n")
+                writer.write(String.format(Locale.US, "%14.4f%14.4f%14.4f                  ", antennaDelta[0], antennaDelta[1], antennaDelta[2]) + "ANTENNA: DELTA H/E/N\n")
+                writer.write(pad60(String.format(Locale.US,
+                    "QC RAW=%d CODE=%d PHASE=%d DOP=%d",
+                    lastStats.rawMeasurements, lastStats.codeAccepted,
+                    lastStats.phaseAccepted, lastStats.dopplerAccepted)) + "COMMENT\n")
+                writer.write(pad60(String.format(Locale.US,
+                    "QC REJ_CODE=%d SLIP_DOP=%d SLIP_MW=%d",
+                    lastStats.codeJumpRejected, lastStats.dopplerSlipDetected,
+                    lastStats.mwSlipDetected)) + "COMMENT\n")
+                writer.write(pad60(String.format(Locale.US,
+                    "QC SLIP_ADR=%d CLOCK_EPOCH=%d",
+                    lastStats.adrStateSlip, lastStats.clockDiscontinuityEpochs)) + "COMMENT\n")
+
+                for (i in 0..4) {
+                    val sysChar = getSysCharFromIndex(i)
+                    val sigs = signalMap[i]
+                    if (sigs.isEmpty()) continue
+                    val obsTypes = mutableListOf<String>()
+                    sigs.forEach { sig ->
+                        val band = sig[0]
+                        val attr = sig[1]
+                        obsTypes.addAll(listOf("C$band$attr", "L$band$attr", "D$band$attr", "S$band$attr"))
+                    }
+                    val chunks = obsTypes.chunked(13) // 每行最多 13 个观测类型，超出写续行。
+                    for ((chunkIdx, chunk) in chunks.withIndex()) {
+                        val sb = StringBuilder()
+                        if (chunkIdx == 0) sb.append(String.format(Locale.US, "%c %4d", sysChar, obsTypes.size))
+                        else sb.append("      ")
+                        chunk.forEach { type -> sb.append(" $type") }
+                        writer.write(pad60(sb.toString()) + "SYS / # / OBS TYPES\n")
+                    }
+                }
+
+                if (glonassSlots.isNotEmpty()) {
+                    var count = 0
+                    val sb = StringBuilder(String.format(Locale.US, "%3d ", glonassSlots.size))
+                    for ((prn, k) in glonassSlots) {
+                        sb.append(String.format(Locale.US, "R%02d %2d ", prn, k))
+                        count++
+                        if (count == 8) {
+                            writer.write(pad60(sb.toString()) + "GLONASS SLOT / FRQ #\n")
+                            sb.clear().append("    ")
+                            count = 0
+                        }
+                    }
+                    if (count > 0) writer.write(pad60(sb.toString()) + "GLONASS SLOT / FRQ #\n")
+                }
+
+                if (epochs.isNotEmpty()) {
+                    val t = epochs[0].time
+                    val timeStr = String.format(Locale.US, "  %04d    %02d    %02d    %02d    %02d   %10.7f     GPS",
+                        t[0].toInt(), t[1].toInt(), t[2].toInt(), t[3].toInt(), t[4].toInt(), t[5])
+                    writer.write(pad60(timeStr) + "TIME OF FIRST OBS\n")
+                }
+                writer.write(pad60("") + "END OF HEADER\n")
+
+                // “>” 行记录 GPST 年月日时分秒、事件标志及有效卫星数，不使用 TXT 第 1 列。
+                for (epoch in epochs) {
+                    val validSats = epoch.sats.filter { !it.isEmpty() }
+                    if (validSats.isEmpty()) continue
+                    val t = epoch.time
+                    writer.write(String.format(Locale.US, "> %04d %02d %02d %02d %02d %10.7f  0 %2d\n",
+                        t[0].toInt(), t[1].toInt(), t[2].toInt(), t[3].toInt(), t[4].toInt(), t[5], validSats.size))
+
+                    val sortedSats = validSats.sortedWith(compareBy({ getSysPriority(it.sys) }, { it.prn }))
+                    for (sat in sortedSats) {
+                        writer.write(String.format(Locale.US, "%c%02d", getSysChar(sat.sys), sat.prn))
+                        val sysIdx = getSysIndex(sat.sys)
+                        for (k in 0 until minOf(signalMap[sysIdx].size, MAX_FRQ)) {
+                            writeObsValue(writer, sat.p[k])
+                            if (abs(sat.l[k]) > NEAR_ZERO) {
+                                // 每个观测域宽 16 字符：14 位数值+1 位 LLI+1 位 SSI；L 数值保留 0.001 cycle。
+                                val lliStr = if (sat.lli[k] != 0) sat.lli[k].toString() else " "
+                                writer.write(String.format(Locale.US, "%14.3f%s ", sat.l[k], lliStr))
+                            } else writer.write("                ")
+                            writeObsValue(writer, sat.d[k])
+                            writeObsValue(writer, sat.s[k])
+                        }
+                        writer.write("\n")
+                    }
+                }
+            }
+            return true
+        } catch (e: Exception) { return false }
+    }
+
+    // 接收机整数 GPST(ns)，暂不扣 Bias 的浮点细项；传播时间最后才扣它。
+    private fun correctedReceiverTimeNanos(obs: GnssSat): Long =
+        obs.timeNanos - obs.fullBiasNanos - obs.receiverClockCorrectionNanos
+
+    // Calendar 用 UTC 时区避免本地时区偏移，但输入是 GPST 秒数，输出仍是 GPST 日历！
+    // 此处不减闰秒；“用 UTC Calendar”不等于“RINEX 观测历元是 UTC”。
+    private fun getRinexTime(obs: GnssSat): DoubleArray {
+        val gpsTimeNanos = correctedReceiverTimeNanos(obs) - obs.biasNanos.toLong()
+        val seconds = gpsTimeNanos / 1000000000L
+        var nanos = gpsTimeNanos % 1000000000L
+        if (nanos < 0) nanos += 1000000000L
         val cal = Calendar.getInstance(TimeZone.getTimeZone("UTC"))
-        cal.timeInMillis = rinexTimeMillis
-
-        val year = cal.get(Calendar.YEAR)
-        val month = cal.get(Calendar.MONTH) + 1
-        val day = cal.get(Calendar.DAY_OF_MONTH)
-        val hour = cal.get(Calendar.HOUR_OF_DAY)
-        val min = cal.get(Calendar.MINUTE)
-
-        val secondsInt = cal.get(Calendar.SECOND)
-        var nanosPart = gpsTimeNanos % 1000000000L
-        if (nanosPart < 0) nanosPart += 1000000000L
-
-        val preciseSeconds = secondsInt + (nanosPart / 1.0e9)
-
-        return RinexTime(year, month, day, hour, min, preciseSeconds)
+        cal.set(1980, 0, 6, 0, 0, 0)
+        cal.set(Calendar.MILLISECOND, 0)
+        cal.timeInMillis += seconds * 1000L
+        return doubleArrayOf(
+            cal.get(Calendar.YEAR).toDouble(), (cal.get(Calendar.MONTH) + 1).toDouble(), cal.get(Calendar.DAY_OF_MONTH).toDouble(),
+            cal.get(Calendar.HOUR_OF_DAY).toDouble(), cal.get(Calendar.MINUTE).toDouble(), cal.get(Calendar.SECOND).toDouble() + (nanos / 1e9)
+        )
     }
 
-    private fun getSmartSignalCode(sys: Int, carrierFreqHz: Double, androidCodeType: String?): String? {
-        val freqMhz = Math.round(carrierFreqHz / 1e5) / 10.0
-        val rawCode = androidCodeType ?: ""
-        var bandId = ""
-        var defaultAttr = ""
-
-        if (sys == SYS_BDS && abs(freqMhz - 1561.1) < 1.0) {
-            bandId = "2"
-            defaultAttr = "I"
-        } else if (abs(freqMhz - 1575.4) < 1.0 || (sys == SYS_GLO && freqMhz > 1590 && freqMhz < 1615)) {
-            bandId = "1"
-            defaultAttr = if (sys == SYS_BDS) "P" else "C"
-        } else if (abs(freqMhz - 1176.4) < 1.0) {
-            bandId = "5"
-            defaultAttr = if (sys == SYS_BDS) "P" else "Q"
-        } else if (abs(freqMhz - 1227.6) < 1.0 || (sys == SYS_GLO && freqMhz > 1230 && freqMhz < 1260)) {
-            bandId = "2"
-            defaultAttr = "C"
-        } else if (abs(freqMhz - 1207.1) < 1.0) {
-            bandId = "7"
-            defaultAttr = if (sys == SYS_BDS) "I" else "Q"
-        } else if (abs(freqMhz - 1268.5) < 1.0) {
-            bandId = "6"
-            defaultAttr = "I"
-        }
-
-        if (bandId.isEmpty()) return null
-        var finalAttr = if (rawCode.isEmpty()) defaultAttr else rawCode
-
-        if (sys == SYS_BDS && "5" == bandId && "Q" == finalAttr) finalAttr = "P"
-        if ("1" == bandId && "L" == finalAttr) return null
-
-        return bandId + finalAttr
+    /**
+     * 按固定 CSV 下标取值，最少需要 29 列；CodeType 在 35 列，旧文件缺此列时无法完整识别信号。
+     * safeXXX 将空/错误数字回退成 0，因而会丢失部分“缺失”和“真实零”的区别。
+     * FullBias=0 直接拒绝；不读取 utcTimeMillis、旧 CarrierPhase 和 31～34 信号间偏差列。
+     */
+    private fun parseLine(line: String): GnssSat? {
+        val tokens = line.split(",")
+        if (tokens.size < 29) return null
+        return try {
+            val sat = GnssSat()
+            sat.timeNanos = safeLong(tokens, 2)
+            sat.fullBiasNanos = safeLong(tokens, 5)
+            if (sat.fullBiasNanos == 0L) return null
+            sat.biasNanos = safeDouble(tokens, 6)
+            sat.hardwareClockDiscontinuityCount = safeInt(tokens, 10)
+            sat.svid = safeInt(tokens, 11)
+            sat.timeOffsetNanos = safeDouble(tokens, 12)
+            sat.state = safeInt(tokens, 13)
+            sat.receivedSvTimeNanos = safeLong(tokens, 14)
+            sat.receivedSvTimeUncertaintyNanos = safeLong(tokens, 15)
+            sat.cn0DbHz = safeDouble(tokens, 16)
+            sat.pseudorangeRateMps = safeDouble(tokens, 17)
+            sat.pseudorangeRateUncertaintyMps = safeDouble(tokens, 18)
+            sat.adrState = safeInt(tokens, 19)
+            sat.adrMeters = safeDouble(tokens, 20)
+            sat.adrUncertaintyMeters = safeDouble(tokens, 21)
+            sat.carrierFrequencyHz = safeDouble(tokens, 22)
+            sat.multipathIndicator = safeInt(tokens, 26)
+            sat.constellationType = safeInt(tokens, 28)
+            if (tokens.size > 35) sat.codeType = tokens[35].trim()
+            sat
+        } catch (e: Exception) { null }
     }
 
-    private fun calculateGlonassSlot(freq: Double): Int? {
-        if (freq > 1.59e9) return Math.round((freq - 1602.0e6) / 0.5625e6).toInt()
-        if (freq > 1.23e9 && freq < 1.26e9) return Math.round((freq - 1246.0e6) / 0.4375e6).toInt()
-        return null
-    }
-
-    private fun getNominalFrequency(sysId: Int, rawFreq: Double, svid: Int): Double {
-        if (sysId == SYS_GLO) {
-            val k = mGlonassFreqMap[svid]
-            if (k != null) {
-                return if (rawFreq > 1.5e9) 1602.0e6 + k * 0.5625e6 else 1246.0e6 + k * 0.4375e6
+    /**
+     * 信号身份 = constellationType + CarrierFrequencyHz + CodeType，不能只凭频率识别。
+     * 例如 BDS B1I 是 1561.098 MHz 的 2I，B1C 是 1575.42 MHz 的 1D/1P/1X。
+     * 此处识别/写入 RINEX 不代表当前 PPP ppp-safe 一定接纳；具体支持表见工程说明。
+     */
+    private fun identifySignals(rawList: List<GnssSat>) {
+        for (obs in rawList) {
+            val freq = obs.carrierFrequencyHz
+            val code = obs.codeType.trim().uppercase(Locale.US)
+            when (obs.constellationType) {
+                1 -> {
+                    obs.sys = SYS_GPS
+                    when {
+                        isNear(freq, 1575420000.0) && code in setOf("C", "S", "L", "X", "P", "W", "Y", "M", "N") ->
+                            addSignal(SYS_GPS, "1$code", obs)
+                        isNear(freq, 1176450000.0) && code in setOf("I", "Q", "X") ->
+                            addSignal(SYS_GPS, "5$code", obs)
+                    }
+                }
+                3 -> {
+                    obs.sys = SYS_GLO
+                    if (freq > 1.59e9) {
+                        if (code in setOf("C", "P")) addSignal(SYS_GLO, "1$code", obs)
+                        glonassSlots[obs.svid] = Math.round((freq - 1602.0e6) / 0.5625e6).toInt()
+                    } else if (freq > 1.23e9 && freq < 1.26e9) {
+                        if (code in setOf("C", "P")) addSignal(SYS_GLO, "2$code", obs)
+                        glonassSlots[obs.svid] = Math.round((freq - 1246.0e6) / 0.4375e6).toInt()
+                    }
+                }
+                5 -> {
+                    obs.sys = SYS_BDS
+                    when {
+                        isNear(freq, 1561098000.0) && code in setOf("I", "Q", "X") ->
+                            addSignal(SYS_BDS, "2$code", obs)
+                        isNear(freq, 1575420000.0) && code in setOf("D", "P", "X") ->
+                            addSignal(SYS_BDS, "1$code", obs)
+                        isNear(freq, 1176450000.0) && code in setOf("D", "P", "Q", "X") ->
+                            addSignal(SYS_BDS, "5$code", obs)
+                        isNear(freq, 1207140000.0) && code in setOf("I", "Q", "X") ->
+                            addSignal(SYS_BDS, "7$code", obs)
+                    }
+                }
+                6 -> {
+                    obs.sys = SYS_GAL
+                    when {
+                        isNear(freq, 1575420000.0) && code in setOf("A", "B", "C", "X", "Z") ->
+                            addSignal(SYS_GAL, "1$code", obs)
+                        isNear(freq, 1176450000.0) && code in setOf("I", "Q", "X") ->
+                            addSignal(SYS_GAL, "5$code", obs)
+                        isNear(freq, 1207140000.0) && code in setOf("I", "Q", "X") ->
+                            addSignal(SYS_GAL, "7$code", obs)
+                    }
+                }
+                4 -> {
+                    if (obs.svid > 192) obs.svid -= 192
+                    obs.sys = SYS_QZS
+                    when {
+                        isNear(freq, 1575420000.0) && code in setOf("C", "S", "L", "X", "Z", "B") ->
+                            addSignal(SYS_QZS, "1$code", obs)
+                        isNear(freq, 1176450000.0) && code in setOf("I", "Q", "X", "D", "P", "Z") ->
+                            addSignal(SYS_QZS, "5$code", obs)
+                    }
+                }
             }
+        }
+    }
+
+    // 空观测用 16 个空格而非字符串 0；P(m)、D(Hz)、S(dB-Hz)统一保留 3 位小数。
+    private fun writeObsValue(writer: BufferedWriter, value: Double) {
+        if (abs(value) > NEAR_ZERO) writer.write(String.format(Locale.US, "%14.3f  ", value))
+        else writer.write("                ")
+    }
+
+    private fun pad60(content: String): String = content.take(60).padEnd(60)
+    // 普通系统归一化为名义频率；GLO FDMA 需卫星频道 k，G1=1602+k*0.5625 MHz、G2=1246+k*0.4375 MHz。
+    private fun getNominalFrequency(sysId: Int, rawFreq: Double, prn: Int): Double {
+        if (sysId == SYS_GLO) {
+            val k = glonassSlots[prn]
+            if (k != null) return if (rawFreq > 1.5e9) 1602.0e6 + k * 0.5625e6 else 1246.0e6 + k * 0.4375e6
             return rawFreq
         } else if (sysId == SYS_BDS) {
             if (abs(rawFreq - 1561.098e6) < 1.0e6) return 1561.098e6
         }
-        return Math.round(rawFreq / 1000.0) * 1000.0
-    }
-
-    private fun calculatePseudorangeSeconds(
-        clock: GnssClock, m: GnssMeasurement, sysId: Int, refFullBiasNanos: Long, refBiasNanos: Double
-    ): Double {
-        val timeNanos = clock.timeNanos
-        val timeOffsetNanos = m.timeOffsetNanos
-
-        val gpsTimeNanos = timeNanos - refFullBiasNanos + timeOffsetNanos.toLong()
-        val tTxNanos = m.receivedSvTimeNanos
-
-        val weekNanos = 604800L * 1000000000L
-        val dayNanos = 86400L * 1000000000L
-
-        var tRxModNanos: Long = 0
-
-        if (sysId == SYS_GPS || sysId == SYS_GAL || sysId == SYS_QZS || sysId == SYS_BDS) {
-            var timeOfWeekNanos = gpsTimeNanos % weekNanos
-            if (sysId == SYS_BDS) {
-                timeOfWeekNanos = (gpsTimeNanos - 14000000000L) % weekNanos
+        return when (sysId) {
+            SYS_GPS, SYS_GAL, SYS_QZS -> when {
+                isNear(rawFreq, 1575420000.0) -> 1575420000.0
+                isNear(rawFreq, 1176450000.0) -> 1176450000.0
+                isNear(rawFreq, 1207140000.0) -> 1207140000.0
+                else -> 0.0
             }
-            tRxModNanos = timeOfWeekNanos
-        } else if (sysId == SYS_GLO) {
-            val timeOfDayNanos = gpsTimeNanos % dayNanos
-            val gloOffsetNanos = (3 * 3600 - LEAP_SECOND) * 1000000000L
-            tRxModNanos = timeOfDayNanos + gloOffsetNanos
-        }
-
-        var flightTimeNanos = tRxModNanos - tTxNanos
-
-        val halfWeekNanos = 302400L * 1000000000L
-        val halfDayNanos = 43200L * 1000000000L
-
-        if (sysId != SYS_GLO) {
-            if (flightTimeNanos > halfWeekNanos) {
-                flightTimeNanos -= weekNanos
-            } else if (flightTimeNanos < -halfWeekNanos) {
-                flightTimeNanos += weekNanos
+            SYS_BDS -> when {
+                isNear(rawFreq, 1561098000.0) -> 1561098000.0
+                isNear(rawFreq, 1575420000.0) -> 1575420000.0
+                isNear(rawFreq, 1176450000.0) -> 1176450000.0
+                isNear(rawFreq, 1207140000.0) -> 1207140000.0
+                else -> 0.0
             }
-        } else {
-            if (flightTimeNanos > halfDayNanos) {
-                flightTimeNanos -= dayNanos
-            } else if (flightTimeNanos < -halfDayNanos) {
-                flightTimeNanos += dayNanos
-            }
+            else -> 0.0
         }
-
-        var pr = (flightTimeNanos - refBiasNanos) * 1e-9
-
-        if ((sysId == SYS_GPS || sysId == SYS_GAL || sysId == SYS_BDS || sysId == SYS_QZS) && pr > 604800)
-            pr %= 604800.0
-        if (sysId == SYS_GLO && pr > 86400)
-            pr %= 86400.0
-
-        return pr
+    }
+    private fun addSignal(sys: Int, sigCode: String, obs: GnssSat) {
+        obs.signalName = sigCode
+        val sysIdx = getSysIndex(sys)
+        if (sysIdx != -1 && !signalMap[sysIdx].contains(sigCode)) signalMap[sysIdx].add(sigCode)
     }
 
-    private fun isMeasurementValid(m: GnssMeasurement, sysId: Int, signalName: String): Boolean {
-        val state = m.state
-        if ((state and STATE_MSEC_AMBIGUOUS) != 0) return false
+    private fun getSysIndex(sys: Int): Int = when (sys) { SYS_GPS -> 0; SYS_GLO -> 1; SYS_GAL -> 2; SYS_BDS -> 3; SYS_QZS -> 4; else -> -1 }
+    private fun getSignalIndex(sys: Int, sigName: String): Int = signalMap[getSysIndex(sys)].indexOf(sigName)
+    private fun getSysChar(sys: Int): Char = when (sys) { SYS_GPS -> 'G'; SYS_GLO -> 'R'; SYS_GAL -> 'E'; SYS_BDS -> 'C'; SYS_QZS -> 'J'; else -> ' ' }
+    private fun getSysPriority(sys: Int): Int = when (sys) { SYS_GPS -> 1; SYS_GLO -> 2; SYS_GAL -> 3; SYS_BDS -> 4; SYS_QZS -> 5; else -> 99 }
+    private fun getSysCharFromIndex(index: Int): Char = arrayOf('G', 'R', 'E', 'C', 'J').getOrElse(index) { ' ' }
+    private fun safeDouble(tokens: List<String>, idx: Int): Double = try { if (idx < tokens.size && tokens[idx].trim().isNotEmpty()) tokens[idx].trim().toDouble() else 0.0 } catch (e: Exception) { 0.0 }
+    private fun safeLong(tokens: List<String>, idx: Int): Long = try { if (idx < tokens.size && tokens[idx].trim().isNotEmpty()) tokens[idx].trim().toLong() else 0L } catch (e: Exception) { 0L }
+    private fun safeInt(tokens: List<String>, idx: Int): Int = try { if (idx < tokens.size && tokens[idx].trim().isNotEmpty()) tokens[idx].trim().toDouble().toInt() else 0 } catch (e: Exception) { 0 }
+    // 基础可用性：身份/载频/CN0 合法；这里只要求 CN0>0，不是例如 30 dB-Hz 的强信号筛选。
+    private fun isTrackingUsable(obs: GnssSat): Boolean =
+        obs.svid > 0 && obs.signalName.isNotEmpty() &&
+            obs.carrierFrequencyHz.isFinite() && obs.carrierFrequencyHz > 0.0 &&
+            obs.cn0DbHz.isFinite() && obs.cn0DbHz > 0.0
 
-        var towDecoded = false
-        if (sysId == SYS_GLO) {
-            towDecoded = (state and STATE_GLO_TOD_DECODED) != 0
-        } else {
-            towDecoded = (state and STATE_TOW_DECODED) != 0
-        }
-        if (!towDecoded) return false
-
-        var codeLock = false
-        if (sysId == SYS_GAL && "1C" == signalName) {
-            codeLock = (state and STATE_GAL_E1BC_CODE_LOCK) != 0 || (state and STATE_GAL_E1C_2ND_CODE_LOCK) != 0
-        } else {
-            codeLock = (state and STATE_CODE_LOCK) != 0
-        }
-        if (!codeLock) return false
-
-        if (m.pseudorangeRateUncertaintyMetersPerSecond > MAXPRRUNCMPS) return false
-        if (m.receivedSvTimeUncertaintyNanos > MAXTOWUNCNS) return false
-        if (m.accumulatedDeltaRangeUncertaintyMeters > MAXADRUNCNS) return false
-
-        return true
-    }
-
-    private fun registerSignal(sys: Int, sig: String): Int {
-        val sysIdx = getSystemIndex(sys)
-        if (sysIdx == -1) return -1
-        for (i in 0 until mNumSignals[sysIdx]) {
-            if (mSignals[sysIdx][i] == sig) return i
-        }
-        if (mNumSignals[sysIdx] < MAX_FRQ) {
-            mSignals[sysIdx][mNumSignals[sysIdx]] = sig
-            mNumSignals[sysIdx]++
-            return mNumSignals[sysIdx] - 1
-        }
-        return -1
-    }
-
-    private fun findOrCreateSat(sats: MutableList<RnxSat>, sys: Int, prn: Int): RnxSat {
-        for (s in sats) {
-            if (s.sys == sys && s.prn == prn) return s
-        }
-        val newSat = RnxSat(sys, prn)
-        sats.add(newSat)
-        return newSat
-    }
-
-    @Throws(IOException::class)
-    private fun writeEpoch(t: RinexTime, sats: List<RnxSat>) {
-        val validSats = mutableListOf<RnxSat>()
-        for (sat in sats) {
-            var allZero = true
-            for (i in 0 until MAX_FRQ) {
-                if (abs(sat.p[i]) > NEAR_ZERO || abs(sat.l[i]) > NEAR_ZERO) {
-                    allZero = false
-                    break
-                }
-            }
-            if (!allZero) validSats.add(sat)
-        }
-
-        validSats.sortWith { o1, o2 ->
-            val p1 = getSystemPriority(o1.sys)
-            val p2 = getSystemPriority(o2.sys)
-            if (p1 != p2) p1.compareTo(p2) else o1.prn.compareTo(o2.prn)
-        }
-
-        mBodyWriter?.write(String.format(Locale.US, "> %04d %02d %02d %02d %02d %10.7f  0 %2d",
-            t.year, t.month, t.day, t.hour, t.min, t.sec, validSats.size))
-        mBodyWriter?.newLine()
-
-        for (sat in validSats) {
-            val sysChar = getSystemChar(sat.sys)
-            var prn = sat.prn
-            if (sat.sys == SYS_QZS) prn -= 192
-
-            mBodyWriter?.write(String.format(Locale.US, "%c%02d", sysChar, prn))
-
-            val sysIdx = getSystemIndex(sat.sys)
-            if (sysIdx != -1) {
-                for (i in 0 until mNumSignals[sysIdx]) {
-                    mBodyWriter?.write(formatObs(sat.p[i]))
-                    val lli = sat.lli[i] and (LLI_SLIP or LLI_HALFC or LLI_BOCTRK)
-                    mBodyWriter?.write(formatPhase(sat.l[i], lli))
-                    mBodyWriter?.write(formatObs(sat.d[i]))
-                    mBodyWriter?.write(formatObs(sat.s[i]))
-                }
-            }
-            mBodyWriter?.newLine()
+    // P 依赖明确的卫星时标及码锁；GLO 是 STRING_SYNC+TOD，不能套普通 TOW 条件。
+    private fun isCodeValid(obs: GnssSat): Boolean {
+        if (obs.receivedSvTimeNanos == 0L ||
+            obs.receivedSvTimeUncertaintyNanos < 0L ||
+            obs.receivedSvTimeUncertaintyNanos > MAX_TOW_UNC_NS) return false
+        val codeLock = (obs.state and STATE_CODE_LOCK) != 0
+        val tow = (obs.state and STATE_TOW_DECODED) != 0 ||
+            (obs.state and STATE_TOW_KNOWN) != 0
+        return when (obs.sys) {
+            SYS_GPS, SYS_BDS, SYS_QZS -> codeLock && tow
+            SYS_GLO -> (obs.state and STATE_GLO_STRING_SYNC) != 0 &&
+                ((obs.state and STATE_GLO_TOD_DECODED) != 0 ||
+                    (obs.state and STATE_GLO_TOD_KNOWN_NEW) != 0)
+            /* A Galileo secondary-code lock alone does not resolve the full
+               transmit time. PPP needs an unambiguous TOW pseudorange. */
+            SYS_GAL -> codeLock && tow
+            else -> false
         }
     }
 
-    private fun formatObs(value: Double): String {
-        if (abs(value) < NEAR_ZERO) return "                "
-        return String.format(Locale.US, "%14.3f  ", value)
-    }
+    // D 的不确定度 0 在此仍允许；不要将 P 不可用或 ADR 无效直接套到 D。
+    private fun isDopplerValid(obs: GnssSat): Boolean =
+        obs.pseudorangeRateMps.isFinite() &&
+            obs.pseudorangeRateUncertaintyMps.isFinite() &&
+            obs.pseudorangeRateUncertaintyMps in 0.0..MAX_PRR_UNC_MPS
 
-    private fun formatPhase(value: Double, lli: Int): String {
-        if (abs(value) < NEAR_ZERO) return "                "
-        val lliStr = if (lli == 0) " " else lli.toString()
-        return String.format(Locale.US, "%14.3f%s ", value, lliStr)
-    }
-
-    @Throws(IOException::class)
-    private fun writeHeader(writer: BufferedWriter) {
-        writer.write("     3.05           OBSERVATION DATA    M: Mixed            RINEX VERSION / TYPE\n")
-        val sdf = SimpleDateFormat("yyyyMMdd HHmmss", Locale.US)
-        sdf.timeZone = TimeZone.getTimeZone("UTC")
-        val dateStr = "${sdf.format(Date())} UTC"
-        val pgm = "GeoLog"
-        var runBy = Build.MANUFACTURER
-        if (runBy.length > 20) runBy = runBy.substring(0, 20)
-
-        val receiverNumber = fitField(mReceiverNumber, 20, "Unknown")
-        val receiverType = fitField(mReceiverType, 20, "${Build.MANUFACTURER} ${Build.MODEL}")
-        val receiverVersion = fitField(mReceiverVersion, 20, Build.VERSION.RELEASE)
-        val antennaNumber = fitField(mAntennaNumber, 20, "unknown")
-        val antennaType = fitField(mAntennaType, 40, "unknown")
-        val observer = fitField(mObserver, 20, "SWJTU")
-        val agency = fitField(mAgency, 40, "SWJTU")
-
-        writer.write(String.format(Locale.US, "%-20s%-20s%-20sPGM / RUN BY / DATE   \n", pgm, runBy, dateStr))
-        writer.write(String.format(Locale.US, "%-60sMARKER NAME         \n", mMarkerName))
-        writer.write(String.format(Locale.US, "%-60sMARKER NUMBER       \n", mMarkerNumber))
-        writer.write(String.format(Locale.US, "%-60sMARKER TYPE         \n", mMarkerType))
-        writer.write(String.format(Locale.US, "%-20s%-40sOBSERVER / AGENCY   \n", observer, agency))
-        writer.write(String.format(Locale.US, "%-20s%-20s%-20sREC # / TYPE / VERS \n", receiverNumber, receiverType, receiverVersion))
-        writer.write(String.format(Locale.US, "%-20s%-40sANT # / TYPE        \n", antennaNumber, antennaType))
-        writer.write(String.format(Locale.US, "%14.4f%14.4f%14.4f                  APPROX POSITION XYZ \n", mApproxPos[0], mApproxPos[1], mApproxPos[2]))
-        writer.write(String.format(Locale.US, "%14.4f%14.4f%14.4f                  ANTENNA: DELTA H/E/N\n", mAntennaDeltaH, mAntennaDeltaE, mAntennaDeltaN))
-
-        val sysChars = charArrayOf('G', 'R', 'E', 'C', 'J')
-        val sysIds = intArrayOf(SYS_GPS, SYS_GLO, SYS_GAL, SYS_BDS, SYS_QZS)
-
-        for (k in 0..4) {
-            val sys = sysIds[k]
-            val idx = getSystemIndex(sys)
-            if (mNumSignals[idx] > 0) {
-                val codes = mutableListOf<String>()
-                for (i in 0 until mNumSignals[idx]) {
-                    val suf = mSignals[idx][i]
-                    codes.add("C$suf")
-                    codes.add("L$suf")
-                    codes.add("D$suf")
-                    codes.add("S$suf")
-                }
-
-                val nObs = codes.size
-                val firstBatch = codes.subList(0, Math.min(codes.size, 13))
-                var sb = java.lang.StringBuilder()
-                for (c in firstBatch) sb.append(String.format("%-4s", c))
-
-                writer.write(String.format(Locale.US, "%c  %3d %-52s SYS / # / OBS TYPES \n", sysChars[k], nObs, sb.toString()))
-
-                var i = 13
-                while (i < codes.size) {
-                    val batch = codes.subList(i, Math.min(codes.size, i + 13))
-                    sb = java.lang.StringBuilder()
-                    for (c in batch) sb.append(String.format("%-4s", c))
-                    writer.write(String.format(Locale.US, "       %-52s SYS / # / OBS TYPES \n", sb.toString()))
-                    i += 13
-                }
-            }
-        }
-
-        if (mGlonassFreqMap.isNotEmpty()) {
-            val sortedSlots = TreeMap(mGlonassFreqMap)
-            var count = 0
-            var sb = java.lang.StringBuilder()
-            sb.append(String.format(Locale.US, "%3d ", sortedSlots.size))
-            for ((key, value) in sortedSlots) {
-                sb.append(String.format(Locale.US, "R%02d %2d ", key, value))
-                count++
-                if (count == 8) {
-                    writer.write(String.format(Locale.US, "%-60sGLONASS SLOT / FRQ #\n", sb.toString()))
-                    sb = java.lang.StringBuilder("    ")
-                    count = 0
-                }
-            }
-            if (count > 0) {
-                writer.write(String.format(Locale.US, "%-60sGLONASS SLOT / FRQ #\n", sb.toString()))
-            }
-        }
-
-        if (mFirstObsTime != null) {
-            writer.write(String.format(Locale.US,
-                "  %04d    %02d    %02d    %02d    %02d   %10.7f     GPS         TIME OF FIRST OBS\n",
-                mFirstObsTime!!.year, mFirstObsTime!!.month, mFirstObsTime!!.day,
-                mFirstObsTime!!.hour, mFirstObsTime!!.min, mFirstObsTime!!.sec))
-        }
-
-        writer.write("                                                            END OF HEADER       \n")
-    }
-
-    private fun getSystemId(constType: Int): Int {
-        return when (constType) {
-            GnssStatus.CONSTELLATION_GPS -> SYS_GPS
-            GnssStatus.CONSTELLATION_GLONASS -> SYS_GLO
-            GnssStatus.CONSTELLATION_BEIDOU -> SYS_BDS
-            GnssStatus.CONSTELLATION_GALILEO -> SYS_GAL
-            GnssStatus.CONSTELLATION_QZSS -> SYS_QZS
-            else -> -1
-        }
-    }
-
-    private fun getSystemIndex(sys: Int): Int {
-        return when (sys) {
-            SYS_GPS -> 0
-            SYS_GLO -> 1
-            SYS_GAL -> 2
-            SYS_BDS -> 3
-            SYS_QZS -> 4
-            else -> -1
-        }
-    }
-
-    private fun getSystemChar(sys: Int): Char {
-        return when (sys) {
-            SYS_GPS -> 'G'
-            SYS_GLO -> 'R'
-            SYS_GAL -> 'E'
-            SYS_BDS -> 'C'
-            SYS_QZS -> 'J'
-            else -> ' '
-        }
-    }
-
-    private fun getSystemPriority(sys: Int): Int {
-        return when (sys) {
-            SYS_GPS -> 1
-            SYS_GLO -> 2
-            SYS_GAL -> 3
-            SYS_BDS -> 4
-            else -> 5
-        }
-    }
-
-    private fun latLonHToXyz(lat: Double, lon: Double, alt: Double): DoubleArray {
-        val a = 6378137.0
-        val f = 1 / 298.257223563
-        val eSq = 2 * f - f * f
-        val radLat = Math.toRadians(lat)
-        val radLon = Math.toRadians(lon)
-        val N = a / Math.sqrt(1 - eSq * Math.pow(Math.sin(radLat), 2.0))
-        val x = (N + alt) * Math.cos(radLat) * Math.cos(radLon)
-        val y = (N + alt) * Math.cos(radLat) * Math.sin(radLon)
-        val z = (N * (1 - eSq) + alt) * Math.sin(radLat)
-        return doubleArrayOf(x, y, z)
-    }
-
-    fun getFile(): File? {
-        return mRinexFile
-    }
+    // 现有离线 L 门限：VALID、finite、非近零、无 RESET/SLIP、ADR 1σ 在 0～0.50 m。
+    // 为保持本次仅注释，不将其改成实时入口的“保留 L+LLI_SLIP、1.0 m”行为。
+    private fun isPhaseValid(obs: GnssSat): Boolean =
+        (obs.adrState and 1) != 0 && obs.adrMeters.isFinite() &&
+            (obs.adrState and (GPS_ADR_STATE_RESET or GPS_ADR_STATE_CYCLE_SLIP)) == 0 &&
+            abs(obs.adrMeters) > NEAR_ZERO &&
+            obs.adrUncertaintyMeters.isFinite() &&
+            obs.adrUncertaintyMeters in 0.0..MAX_ADR_UNC_METERS
+    // 10 kHz 是信号识别容差，不代表载频精度或 PPP 测距精度。
+    private fun isNear(val1: Double, val2: Double): Boolean = abs(val1 - val2) < 10000.0
 }

@@ -1,191 +1,482 @@
 <?xml version="1.0" encoding="utf-8"?>
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#F5F7FA"
-    android:padding="12dp">
+    android:background="@color/white"
+    android:orientation="vertical">
 
     <LinearLayout
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="vertical">
-
+        android:layout_height="70dp"
+        android:background="@drawable/bg_gnss_header"
+        android:gravity="center_vertical"
+        android:orientation="vertical"
+        android:paddingHorizontal="20dp">
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="GNSS  PPP 定位"
+            android:text="GNSS · FIELD"
+            android:textColor="@color/white"
             android:textSize="22sp"
-            android:textStyle="bold"
-            android:textColor="#2C3E50"
-            android:layout_marginBottom="16dp"
-            android:gravity="center" />
-
-        <com.google.android.material.card.MaterialCardView
+            android:textStyle="bold" />
+        <TextView
+            android:id="@+id/tvHeaderStatus"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            app:cardCornerRadius="12dp"
-            app:cardElevation="4dp"
-            android:layout_marginBottom="16dp">
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:padding="16dp">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="1. 静态观测采集"
-                    android:textStyle="bold"
-                    android:textColor="#34495E"
-                    android:textSize="18sp" />
-
-                <Chronometer
-                    android:id="@+id/chronometer"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:gravity="center"
-                    android:textSize="36sp"
-                    android:textColor="#2980B9"
-                    android:layout_marginVertical="12dp"/>
-
-                <TextView
-                    android:id="@+id/tvStatus"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="等待采集..."
-                    android:layout_gravity="center"
-                    android:textColor="#7F8C8D"
-                    android:layout_marginBottom="12dp" />
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="horizontal">
-
-                    <Button
-                        android:id="@+id/btnStart"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="开始记录"
-                        android:backgroundTint="#27AE60"
-                        android:layout_marginEnd="8dp"/>
-
-                    <Button
-                        android:id="@+id/btnStop"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="停止"
-                        android:backgroundTint="#E74C3C" />
-                </LinearLayout>
-
-                <Button
-                    android:id="@+id/btnConvert"
-                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="转换 RINEX (.26o) 文件"
-                    android:layout_marginTop="8dp" />
-
-                <TextView
-                    android:id="@+id/tvFilePath"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:textSize="12sp"
-                    android:textColor="#95A5A6"
-                    android:layout_marginTop="4dp" />
-            </LinearLayout>
-        </com.google.android.material.card.MaterialCardView>
-
-        <com.google.android.material.card.MaterialCardView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            app:cardCornerRadius="12dp"
-            app:cardElevation="4dp"
-            android:layout_marginBottom="16dp">
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:padding="16dp">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="2. 武大 IGS 精密产品拉取"
-                    android:textStyle="bold"
-                    android:textColor="#34495E"
-                    android:textSize="18sp"
-                    android:layout_marginBottom="12dp"/>
-
-                <Button
-                    android:id="@+id/btnDownload"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="智能下载最新 SP3 / CLK"
-                    app:icon="@android:drawable/stat_sys_download"
-                    android:backgroundTint="#2980B9" />
-
-                <TextView
-                    android:id="@+id/tvLog"
-                    android:layout_width="match_parent"
-                    android:layout_height="120dp"
-                    android:layout_marginTop="12dp"
-                    android:background="#1E1E1E"
-                    android:textColor="#00FF00"
-                    android:textSize="11sp"
-                    android:padding="8dp"
-                    android:scrollbars="vertical"
-                    android:fontFamily="monospace"
-                    android:text="FTP 终端已就绪...\n" />
-            </LinearLayout>
-        </com.google.android.material.card.MaterialCardView>
-
-        <com.google.android.material.card.MaterialCardView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            app:cardCornerRadius="12dp"
-            app:cardElevation="4dp"
-            app:strokeColor="#8E44AD"
-            app:strokeWidth="2dp">
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:padding="16dp">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="3. RTKLIB 事后解算"
-                    android:textStyle="bold"
-                    android:textColor="#8E44AD"
-                    android:textSize="18sp"
-                    android:layout_marginBottom="12dp"/>
-
-                <Button
-                    android:id="@+id/btnRunPpp"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="启动 PPP 引擎"
-                    android:backgroundTint="#8E44AD" />
-
-                <TextView
-                    android:id="@+id/tvPppResult"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:textSize="14sp"
-                    android:textColor="#2C3E50"
-                    android:text="解算结果将显示在这里..." />
-            </LinearLayout>
-        </com.google.android.material.card.MaterialCardView>
-
+            android:layout_marginTop="2dp"
+            android:text="等待 GNSS 信号"
+            android:textColor="#DCCFFF"
+            android:textSize="11sp" />
     </LinearLayout>
-</ScrollView>
+
+    <com.google.android.material.tabs.TabLayout
+        android:id="@+id/tabNavigation"
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:background="#F8F6FC"
+        app:tabGravity="fill"
+        app:tabIndicatorColor="@color/gnss_purple"
+        app:tabIndicatorFullWidth="false"
+        app:tabMode="fixed"
+        app:tabSelectedTextColor="@color/gnss_purple"
+        app:tabTextColor="#726A7F" />
+
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <ScrollView
+            android:id="@+id/pageLog"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:fillViewport="true">
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    style="@style/Gnss.SectionTitle"
+                    android:text="数据采集" />
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="原始观测记录与 RINEX 导出"
+                    android:textColor="@color/gnss_muted"
+                    android:textSize="13sp" />
+                <com.google.android.material.card.MaterialCardView
+                    style="@style/Gnss.Card"
+                    android:layout_marginTop="12dp">
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical">
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:gravity="center_vertical"
+                            android:orientation="horizontal"
+                            android:paddingHorizontal="14dp"
+                            android:paddingTop="14dp"
+                            android:paddingBottom="10dp">
+                            <TextView
+                                android:layout_width="0dp"
+                                android:layout_height="wrap_content"
+                                android:layout_weight="1"
+                                android:text="实时原始观测"
+                                android:textColor="@color/gnss_text"
+                                android:textSize="15sp"
+                                android:textStyle="bold" />
+                            <TextView
+                                android:id="@+id/tvMeasurementSummary"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="等待数据"
+                                android:textColor="@color/gnss_purple"
+                                android:textSize="12sp" />
+                        </LinearLayout>
+                        <androidx.core.widget.NestedScrollView
+                            android:layout_width="match_parent"
+                            android:layout_height="226dp"
+                            android:fillViewport="true"
+                            android:scrollbars="vertical">
+                            <com.example.ftpget.GnssDataTableView
+                                android:id="@+id/measurementTable"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content" />
+                        </androidx.core.widget.NestedScrollView>
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:paddingHorizontal="14dp"
+                            android:paddingTop="8dp"
+                            android:paddingBottom="12dp"
+                            android:text="SV 时间单位 ns · ADR 单位 m · 频率单位 MHz；表格可左右滑动"
+                            android:textColor="@color/gnss_muted"
+                            android:textSize="11sp" />
+                    </LinearLayout>
+                </com.google.android.material.card.MaterialCardView>
+
+                <com.google.android.material.card.MaterialCardView
+                    style="@style/Gnss.Card"
+                    android:layout_marginTop="14dp">
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:padding="16dp">
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="观测时长"
+                            android:textColor="@color/gnss_muted"
+                            android:textSize="12sp" />
+                        <Chronometer
+                            android:id="@+id/chronometer"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="4dp"
+                            android:fontFamily="sans-serif-medium"
+                            android:textColor="@color/gnss_purple"
+                            android:textSize="38sp" />
+                        <TextView
+                            android:id="@+id/tvStatus"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="4dp"
+                            android:text="等待采集..."
+                            android:textColor="@color/gnss_muted"
+                            android:textSize="13sp" />
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="12dp"
+                            android:orientation="horizontal">
+                            <com.google.android.material.button.MaterialButton
+                                android:id="@+id/btnStart"
+                                style="@style/Gnss.ActionButton"
+                                android:layout_width="0dp"
+                                android:layout_weight="1"
+                                android:text="开始采集" />
+                            <com.google.android.material.button.MaterialButton
+                                android:id="@+id/btnStop"
+                                style="@style/Gnss.ActionButton"
+                                android:layout_width="0dp"
+                                android:layout_marginStart="8dp"
+                                android:layout_weight="1"
+                                android:text="停止采集" />
+                        </LinearLayout>
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnConvert"
+                            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="48dp"
+                            android:layout_marginTop="8dp"
+                            android:text="转换为 RINEX"
+                            android:textAllCaps="false"
+                            android:textColor="@color/gnss_purple"
+                            app:strokeColor="@color/gnss_purple" />
+                        <TextView
+                            android:id="@+id/tvFilePath"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="8dp"
+                            android:ellipsize="middle"
+                            android:maxLines="2"
+                            android:text="采集文件将显示在这里"
+                            android:textColor="@color/gnss_muted"
+                            android:textSize="12sp" />
+                        <TextView
+                            android:id="@+id/tvCaptureMessage"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="8dp"
+                            android:text="等待采集或转换操作"
+                            android:textColor="@color/gnss_muted"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+                </com.google.android.material.card.MaterialCardView>
+
+                <com.google.android.material.card.MaterialCardView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="18dp"
+                    app:cardBackgroundColor="@color/surface"
+                    app:cardCornerRadius="18dp"
+                    app:cardElevation="2dp"
+                    app:strokeColor="@color/outline"
+                    app:strokeWidth="1dp">
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:padding="16dp">
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:gravity="center_vertical"
+                            android:orientation="horizontal">
+                            <TextView
+                                style="@style/Gnss.SectionTitle"
+                                android:layout_width="0dp"
+                                android:layout_weight="1"
+                                android:text="精密产品下载" />
+                            <TextView
+                                android:id="@+id/tvDownloadDate"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:layout_marginStart="8dp"
+                                android:text="目标日期 —"
+                                android:textColor="@color/gnss_purple"
+                                android:textSize="12sp"
+                                android:textStyle="bold" />
+                        </LinearLayout>
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="4dp"
+                            android:text="轨道 · 钟差 · 偏差 · 电离层 · 对流层 · 星历"
+                            android:textColor="@color/gnss_muted"
+                            android:textSize="12sp" />
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnDownload"
+                            style="@style/Gnss.ActionButton"
+                            android:layout_width="match_parent"
+                            android:layout_marginTop="14dp"
+                            android:text="开始下载" />
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="14dp"
+                            android:gravity="center_vertical"
+                            android:orientation="horizontal">
+                            <TextView
+                                android:id="@+id/tvDownloadStage"
+                                android:layout_width="0dp"
+                                android:layout_height="wrap_content"
+                                android:layout_weight="1"
+                                android:text="等待下载"
+                                android:textColor="@color/gnss_text"
+                                android:textSize="14sp"
+                                android:textStyle="bold" />
+                            <TextView
+                                android:id="@+id/tvDownloadPercent"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="—"
+                                android:textColor="@color/gnss_purple"
+                                android:textSize="14sp"
+                                android:textStyle="bold" />
+                        </LinearLayout>
+                        <ProgressBar
+                            android:id="@+id/downloadProgressBar"
+                            style="?android:attr/progressBarStyleHorizontal"
+                            android:layout_width="match_parent"
+                            android:layout_height="8dp"
+                            android:layout_marginTop="10dp"
+                            android:max="100"
+                            android:progress="0"
+                            android:progressBackgroundTint="@color/surface_soft"
+                            android:progressTint="@color/gnss_purple" />
+                        <TextView
+                            android:id="@+id/tvDownloadFile"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="8dp"
+                            android:ellipsize="middle"
+                            android:maxLines="2"
+                            android:text="下载时将显示当前文件与已传输大小"
+                            android:textColor="@color/gnss_muted"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+                </com.google.android.material.card.MaterialCardView>
+            </LinearLayout>
+        </ScrollView>
+
+        <ScrollView
+            android:id="@+id/pageView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:visibility="gone">
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+                <TextView style="@style/Gnss.SectionTitle" android:text="卫星天空图" />
+                <TextView
+                    android:id="@+id/tvSatelliteSummary"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="等待卫星状态..."
+                    android:textColor="@color/gnss_muted"
+                    android:textSize="13sp" />
+                <com.example.ftpget.SkyPlotView
+                    android:id="@+id/skyPlotView"
+                    android:layout_width="match_parent"
+                    android:layout_height="340dp"
+                    android:layout_marginTop="8dp" />
+                <com.google.android.material.card.MaterialCardView
+                    style="@style/Gnss.Card"
+                    android:layout_marginTop="14dp">
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical">
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:paddingHorizontal="14dp"
+                            android:paddingTop="14dp"
+                            android:paddingBottom="10dp"
+                            android:text="卫星列表"
+                            android:textColor="@color/gnss_text"
+                            android:textSize="16sp"
+                            android:textStyle="bold" />
+                        <com.example.ftpget.GnssDataTableView
+                            android:id="@+id/satelliteTable"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content" />
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:paddingHorizontal="14dp"
+                            android:paddingTop="8dp"
+                            android:paddingBottom="12dp"
+                            android:text="彩色卫星号区分星座 · ● 表示参与系统定位"
+                            android:textColor="@color/gnss_muted"
+                            android:textSize="11sp" />
+                    </LinearLayout>
+                </com.google.android.material.card.MaterialCardView>
+            </LinearLayout>
+        </ScrollView>
+
+        <ScrollView
+            android:id="@+id/pagePos"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:visibility="gone">
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+                <TextView style="@style/Gnss.SectionTitle" android:text="信号与定位" />
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="各系统最强卫星 C/N₀ · 当前设备定位"
+                    android:textColor="@color/gnss_muted"
+                    android:textSize="13sp" />
+                <com.example.ftpget.SignalBarView
+                    android:id="@+id/signalBarView"
+                    android:layout_width="match_parent"
+                    android:layout_height="260dp"
+                    android:layout_marginTop="16dp" />
+                <com.google.android.material.card.MaterialCardView
+                    style="@style/Gnss.Card"
+                    android:layout_marginTop="18dp">
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:padding="16dp">
+                        <TextView style="@style/Gnss.SectionTitle" android:text="设备定位" />
+                        <TextView
+                            android:id="@+id/tvDevicePosition"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="10dp"
+                            android:text="等待手机定位..."
+                            android:textColor="@color/gnss_text"
+                            android:textSize="14sp" />
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="8dp"
+                            android:text="设备定位并非 PPP 解算结果"
+                            android:textColor="@color/gnss_muted"
+                            android:textSize="11sp" />
+                    </LinearLayout>
+                </com.google.android.material.card.MaterialCardView>
+                <com.google.android.material.card.MaterialCardView
+                    style="@style/Gnss.Card"
+                    android:layout_marginTop="12dp">
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:padding="16dp">
+                        <TextView style="@style/Gnss.SectionTitle" android:text="实时 PPP 测试" />
+                        <TextView
+                            android:id="@+id/tvPppResult"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="8dp"
+                            android:text="等待启动实时 PPP；仅显示 GPST、Q、卫星数、坐标和处理耗时。"
+                            android:textColor="@color/gnss_muted"
+                            android:textSize="13sp" />
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnLivePpp"
+                            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="48dp"
+                            android:layout_marginTop="10dp"
+                            android:enabled="true"
+                            android:text="启动实时 PPP"
+                            android:textAllCaps="false" />
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnRunPpp"
+                            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="48dp"
+                            android:layout_marginTop="8dp"
+                            android:text="RINEX 后处理 PPP（PC 内核）"
+                            android:textAllCaps="false" />
+                    </LinearLayout>
+                </com.google.android.material.card.MaterialCardView>
+            </LinearLayout>
+        </ScrollView>
+
+        <LinearLayout
+            android:id="@+id/pageMap"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:visibility="gone">
+            <TextView
+                android:id="@+id/tvMapStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:padding="14dp"
+                android:text="等待设备定位。点击下方按钮刷新地图。"
+                android:textColor="@color/gnss_text"
+                android:textSize="13sp" />
+            <WebView
+                android:id="@+id/mapWebView"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1" />
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnRefreshMap"
+                style="@style/Gnss.ActionButton"
+                android:layout_width="match_parent"
+                android:layout_margin="12dp"
+                android:text="定位到当前位置" />
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnOpenMap"
+                style="@style/Widget.MaterialComponents.Button.TextButton"
+                android:layout_width="match_parent"
+                android:layout_height="40dp"
+                android:text="在手机地图中打开"
+                android:textAllCaps="false"
+                android:textColor="@color/gnss_purple" />
+        </LinearLayout>
+    </FrameLayout>
+</LinearLayout>
