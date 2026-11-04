@@ -23,6 +23,45 @@
 #define MIN_EL      0.0         /* min elevation angle (rad) */
 #define MIN_HGT     -1000.0     /* min user height (m) */
 
+/* IONEX epochs are UT/UTC labels, kept unchanged by the reader. The public
+ * iontec() API takes GPST. Convert the query once, before both interpolation
+ * and sun-fixed rotation. No environment access or global mode in the core. */
+extern int ionex_time_select(nav_t *nav,const char *mode)
+{
+    int selected=IONEX_TIME_CORRECTED;
+    if(!nav)return 0;
+    if(mode && *mode) {
+        if(!strcmp(mode,"LEGACY"))selected=IONEX_TIME_LEGACY;
+        else if(strcmp(mode,"CORRECTED")) {
+            trace(1,"IONEX_TIME_ERROR,reason=INVALID_MODE,value=%s\n",mode);
+            return 0;
+        }
+    }
+    nav->ionex_time_mode=(uint8_t)selected;
+    trace(2,"IONEX_TIME_MODEL,mode=%s,input=GPST,maps=UTC,query=%s\n",
+        selected==IONEX_TIME_LEGACY?"LEGACY":"CORRECTED",
+        selected==IONEX_TIME_LEGACY?"GPST_MIXED_WITH_UTC":"UTC");
+    return 1;
+}
+
+extern gtime_t ionex_query_time(gtime_t gpst,const nav_t *nav)
+{
+    return nav && nav->ionex_time_mode==IONEX_TIME_LEGACY ? gpst : gpst2utc(gpst);
+}
+
+/* This is the actual interpolation domain, also used by product diagnostics.
+ * Legacy rejected the last map's exact epoch; corrected admits both ends. */
+extern int ionex_in_range(gtime_t gpst,const nav_t *nav)
+{
+    gtime_t query;double end;
+    if(!nav || !nav->tec || nav->nt<2 || !isfinite(gpst.sec) ||
+       nav->ionex_time_mode>IONEX_TIME_LEGACY)return 0;
+    query=ionex_query_time(gpst,nav);
+    end=timediff(query,nav->tec[nav->nt-1].time);
+    return timediff(query,nav->tec[0].time)>=0.0 &&
+        (nav->ionex_time_mode==IONEX_TIME_LEGACY ? end<0.0 : end<=0.0);
+}
+
 /* get index -----------------------------------------------------------------*/
 static int getindex(double value, const double *range)
 {
@@ -279,7 +318,8 @@ static void combtec(nav_t *nav)
 *                                 nav->nt, nav->ntmax and nav->tec are modified
 *          int    opt         I   read option (1: no clear of tec data,0:clear)
 * return : none
-* notes  : see ref [1]
+* notes  : map epochs remain UTC, as specified by IONEX ref [1].
+*          iontec() converts its GPST query to UTC (except explicit LEGACY).
 *-----------------------------------------------------------------------------*/
 extern void readtec(const char *file, nav_t *nav, int opt)
 {
@@ -438,6 +478,8 @@ extern int iontec(gtime_t time, const nav_t *nav, const double *pos,
     int i,stat[2];
     
     char tstr[40];
+    if(!nav || !isfinite(time.sec) || nav->ionex_time_mode>IONEX_TIME_LEGACY)
+        return 0;
     trace(3,"iontec  : time=%s pos=%.1f %.1f azel=%.1f %.1f\n",time2str(time,tstr,0),
           pos[0]*R2D,pos[1]*R2D,azel[0]*R2D,azel[1]*R2D);
     
@@ -446,13 +488,19 @@ extern int iontec(gtime_t time, const nav_t *nav, const double *pos,
         *var=VAR_NOTEC;
         return 1;
     }
+    if(!ionex_in_range(time,nav)) {
+        trace(2,"%s: tec grid out of period (query=GPST,mode=%s)\n",
+            time2str(time,tstr,0),nav->ionex_time_mode==IONEX_TIME_LEGACY?
+            "LEGACY":"CORRECTED");
+        return 0;
+    }
+    time=ionex_query_time(time,nav);
     for (i=0;i<nav->nt;i++) {
         if (timediff(nav->tec[i].time,time)>0.0) break;
     }
-    if (i==0||i>=nav->nt) {
-        trace(2,"%s: tec grid out of period\n",time2str(time,tstr,0));
-        return 0;
-    }
+    /* At the final corrected epoch use the last interval with a=1. The
+     * range check above still rejects extrapolation and preserves legacy. */
+    if(i>=nav->nt)i=nav->nt-1;
     if ((tt=timediff(nav->tec[i].time,nav->tec[i-1].time))==0.0) {
         trace(2,"tec grid time interval error\n");
         return 0;

@@ -1,8 +1,8 @@
 package com.example.ftpget
 
 import android.content.Context
-import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.util.AttributeSet
 import android.view.Gravity
@@ -24,13 +24,11 @@ class GnssDataTableView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null
 ) : HorizontalScrollView(context, attrs) {
     private val density = resources.displayMetrics.density
-    private val mutedColor = Color.rgb(116, 111, 130)
-    private val textColor = Color.rgb(36, 32, 51)
-    private val dividerColor = Color.rgb(233, 229, 240)
+    private var palette = GnssViewPalette.initial()
     private val table = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
     private val emptyView = TextView(context).apply {
         text = "等待数据…"
-        setTextColor(mutedColor)
+        setTextColor(palette.muted)
         textSize = 12f
         gravity = Gravity.CENTER_VERTICAL
         setPadding(dp(12), 0, dp(12), 0)
@@ -38,12 +36,28 @@ class GnssDataTableView @JvmOverloads constructor(
     }
     private val rowViews = mutableListOf<LinearLayout>()
     private var columns: List<GnssTableColumn> = emptyList()
+    private var lastRows: List<GnssTableRow> = emptyList()
+    private var lastEmptyText = "等待数据…"
 
     init {
         isFillViewport = true
         isHorizontalScrollBarEnabled = true
         overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+        setBackgroundColor(palette.background)
         addView(table, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
+    }
+
+    fun setPalette(colors: GnssViewPalette) {
+        if (palette == colors) return
+        palette = colors
+        setBackgroundColor(colors.background)
+        emptyView.setTextColor(colors.muted)
+        val existingColumns = columns
+        columns = emptyList()
+        if (existingColumns.isNotEmpty()) {
+            configure(existingColumns)
+            updateRows(lastRows, lastEmptyText)
+        }
     }
 
     fun configure(newColumns: List<GnssTableColumn>) {
@@ -51,12 +65,19 @@ class GnssDataTableView @JvmOverloads constructor(
         columns = newColumns
         rowViews.clear()
         table.removeAllViews()
+        table.dividerDrawable = GradientDrawable().apply {
+            setColor(palette.grid)
+            setSize(1, dp(1))
+        }
+        table.showDividers = LinearLayout.SHOW_DIVIDER_MIDDLE
         table.addView(createRow(newColumns.map { it.title }, header = true))
         table.addView(emptyView)
     }
 
     fun updateRows(rows: List<GnssTableRow>, emptyText: String = "等待数据…") {
         if (columns.isEmpty()) return
+        lastRows = rows
+        lastEmptyText = emptyText
         emptyView.text = emptyText
         emptyView.visibility = if (rows.isEmpty()) View.VISIBLE else View.GONE
 
@@ -77,10 +98,10 @@ class GnssDataTableView @JvmOverloads constructor(
                 val cell = rowView.getChildAt(cellIndex) as TextView
                 cell.text = row.values.getOrElse(cellIndex) { "—" }
                 cell.setTextColor(when {
-                    cellIndex == 0 && row.system != null -> satelliteColor(row.system)
-                    cellIndex == columns.lastIndex && row.usedInFix == true -> Color.rgb(14, 147, 113)
-                    cellIndex == columns.lastIndex && row.usedInFix == false -> mutedColor
-                    else -> textColor
+                    cellIndex == 0 && row.system != null -> satelliteColor(row.system, palette.dark)
+                    cellIndex == columns.lastIndex && row.usedInFix == true -> palette.success
+                    cellIndex == columns.lastIndex && row.usedInFix == false -> palette.muted
+                    else -> palette.foreground
                 })
             }
         }
@@ -90,31 +111,28 @@ class GnssDataTableView @JvmOverloads constructor(
         val row = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            minimumHeight = dp(if (header) 40 else 42)
+            minimumHeight = dp(44)
             background = if (header) rowBackground(-1) else rowBackground(0)
         }
         columns.forEachIndexed { index, column ->
             row.addView(TextView(context).apply {
                 text = values.getOrElse(index) { "" }
-                gravity = Gravity.CENTER_VERTICAL or if (header) Gravity.CENTER_HORIZONTAL else column.gravity
-                setPadding(dp(7), dp(3), dp(7), dp(3))
+                gravity = Gravity.CENTER_VERTICAL or column.gravity
+                setPadding(dp(10), dp(3), dp(10), dp(3))
                 setSingleLine(true)
                 textSize = if (header) 11f else 12f
                 typeface = if (header || index == 0) Typeface.DEFAULT_BOLD else Typeface.MONOSPACE
-                setTextColor(if (header) mutedColor else textColor)
-            }, LinearLayout.LayoutParams(dp(column.widthDp), dp(if (header) 40 else 42)))
+                setTextColor(if (header) palette.muted else palette.foreground)
+            }, LinearLayout.LayoutParams(dp(column.widthDp), dp(44)))
         }
         return row
     }
 
-    private fun rowBackground(index: Int): GradientDrawable = GradientDrawable().apply {
-        setColor(when {
-            index < 0 -> Color.rgb(244, 240, 251)
-            index % 2 == 0 -> Color.WHITE
-            else -> Color.rgb(250, 248, 253)
+    private fun rowBackground(index: Int): ColorDrawable = ColorDrawable(when {
+            index < 0 -> palette.header
+            index % 2 == 0 -> palette.background
+            else -> palette.alternate
         })
-        setStroke(dp(1), dividerColor)
-    }
 
     private fun dp(value: Int): Int = (value * density + 0.5f).toInt()
 }

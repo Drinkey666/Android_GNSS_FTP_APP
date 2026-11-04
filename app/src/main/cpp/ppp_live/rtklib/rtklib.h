@@ -97,6 +97,8 @@ extern "C" {
 #define HION        350000.0            /* ionosphere height (m) */
 
 #define MAXFREQ     6                   /* max NFREQ */
+#define MAX_ANTEX_FREQ 10               /* physical ANTEX frequency IDs 01..09 */
+#define MAX_BIAS_SYS 6                  /* G/R/E/C/J/I bias reference systems */
 
 #define FREQL1      1.57542E9           /* L1/E1  frequency (Hz) */
 #define FREQL2      1.22760E9           /* L2     frequency (Hz) */
@@ -632,6 +634,13 @@ typedef struct {        /* antenna parameter type */
     double off[NFREQ][ 3]; /* phase center offset e/n/u or x/y/z (m) */
     double var[NFREQ][19]; /* phase center variation (m) */
                         /* el=90,85,...,0 or nadir=0,1,2,3,... (deg) */
+    /* Satellite PCO indexed by the physical ANTEX frequency number, not by
+     * an RTKLIB observation slot.  Kept separate while the legacy PPP model
+     * continues to use off[]/var[] unchanged.  Bit n means ID n is present. */
+    uint16_t antex_pco_mask;
+    double antex_pco[MAX_ANTEX_FREQ][3];
+    uint16_t antex_pcv_mask;
+    double antex_pcv[MAX_ANTEX_FREQ][19];
 } pcv_t;
 
 typedef struct {        /* antenna parameters type */
@@ -750,7 +759,7 @@ typedef struct {        /* NORAD TLE (two line element) type */
 } tle_t;
 
 typedef struct {        /* TEC grid type */
-    gtime_t time;       /* epoch time (GPST) */
+    gtime_t time;       /* IONEX map epoch (UTC); iontec() accepts GPST */
     int ndata[3];       /* TEC grid data size {nlat,nlon,nhgt} */
     double rb;          /* earth radius (km) */
     double lats[3];     /* latitude start/interval (deg) */
@@ -890,6 +899,16 @@ typedef struct {        /* navigation data type */
     int nosb,nosbmax;  /* number/capacity of time-bounded code OSBs */
     codeosb_t *osbs;   /* Bias-SINEX code OSB records */
     int osb_head[MAXSAT][MAXCODE+1]; /* first record per satellite/code, index + 1 */
+    /* Bias-SINEX satellite-clock reference, indexed like code2bias_ix()
+     * (G/R/E/C/J/I).  ANTEX physical frequency ID and a representative
+     * RINEX code are kept together so GLONASS channel frequencies are exact.
+     * status: 0=not declared, 1=valid pair, 2=conflicting declarations. */
+    uint8_t clock_ref_status[MAX_BIAS_SYS];
+    uint8_t clock_ref_antex[MAX_BIAS_SYS][2];
+    uint8_t clock_ref_code[MAX_BIAS_SYS][2];
+    char bia_apc_model[64];
+    uint8_t legacy_product_reference; /* explicit historical APC/DCB replay */
+    uint8_t ionex_time_mode; /* IONEX_TIME_*; independent of A/B/C/APC policy */
     double rbias[MAXRCV][MAX_CODE_BIAS_FREQS][MAX_CODE_BIASES]; /* receiver DCB (0:P1-P2,1:P1-C1,2:P2-C2) (m) */
     pcv_t pcvs[MAXSAT]; /* satellite antenna pcv */
     sbssat_t sbssat;    /* SBAS satellite corrections */
@@ -1102,6 +1121,12 @@ typedef struct {        /* processing options type */
     double odisp[2][2][11][3]; // Ocean tide loading parameters {rov,base}{amp,phase}
     int  freqopt;       /* disable L2-AR */
     char pppopt[256];   /* ppp option */
+    int ppp_baseline;   /* PPP_BASELINE_*; zero preserves historical defaults */
+    int ppp_lifecycle;  /* PPP_LIFECYCLE_*; A always uses corrected arcs/history */
+    int ppp_clock_mode; /* PPP_CLOCK_*; AUTO keeps B legacy, A/C common-mode seed */
+    int ppp_rcb_datum,ppp_wet_correction,ppp_iekf; /* explicit estimator profile, 0=legacy */
+    int ppp_gal_e5b;    /* opt-in raw E5b C7Q/L7Q with its own receiver code bias */
+    int ppp_physical_atmosphere; /* physical I_L1 + relative actual-code RCB; opt-in */
 } prcopt_t;
 
 typedef struct {        /* solution options type */
@@ -1226,6 +1251,7 @@ typedef struct {        /* satellite status type */
     double psm_var[NFREQ], psm_rate_var[NFREQ], psm_rate_cov[NFREQ];
     double psm_past_cov[NFREQ]; /* Cov(current smoothing error,sum of past errors) */
     gtime_t ppp_ion_prior_time; /* last consumed IONEX information for this satellite */
+    gtime_t ppp_ion_observation_time; /* PHYSICAL: last supported P/L, independent of accepted carrier outc */
     /* Per-epoch raw-code precheck result. A rejected code never enters the
        smoother, ambiguity initialization, or PPP measurement update. */
     uint8_t ppp_code_bad[NFREQ];
@@ -1259,6 +1285,9 @@ typedef struct {        /* satellite status type */
     double ppp_diag_cmc_last[NFREQ];
     uint8_t ppp_diag_cmc_code[NFREQ];
     uint8_t ppp_diag_cmc_half_invalid[NFREQ];
+    uint8_t ppp_arc_pending[NFREQ]; /* ambiguity invalid until a finite seed exists */
+    uint8_t ppp_arc_reset[NFREQ];   /* reset occurred in current prediction */
+    uint8_t ppp_slip_evidence[NFREQ]; /* PPP_EVIDENCE_* for current epoch */
 } ssat_t;
 
 typedef struct {        /* ambiguity control type */
@@ -1291,10 +1320,17 @@ typedef struct {        /* RTK control/result type */
     /* PPP code/Doppler bootstrap state. These flags let PPP start with a
      * robust code-only solution, then introduce phase ambiguities cleanly. */
     gtime_t ppp_start_time;
+    double ppp_trop_base,ppp_trop_zhd; /* frozen epoch model ZWD/ZHD, metres */
+    gtime_t ppp_trop_time; /* frozen atmospheric model epoch */
     gtime_t ppp_zwd_prior_time; /* last consumed VMF3 wet-prior information */
     unsigned char ppp_start_valid;
     unsigned char ppp_code_warmup;
     unsigned char ppp_phase_started;
+    int ppp_estimator_flags,ppp_estimator_locked; /* basis cannot change in a live session */
+    int ppp_failure;    /* FILTER_* or PPP_FAILURE_*; current epoch only */
+    int ppp_clock_valid,ppp_spp_clock_valid;
+    double ppp_clock_m,ppp_spp_clock_m; /* committed PPP / isolated SPP candidate */
+    gtime_t ppp_clock_time;
     int intpres_nb;     // Time interpolation of residuals, number of previous base observations.
     obsd_t intpres_obsb[MAXOBS]; // Time interpolation of residuals, previous base observations.
 } rtk_t;
@@ -1501,6 +1537,38 @@ EXPORT int  solve (const char *tr, const double *A, const double *Y, int n,
                    int m, double *X);
 EXPORT int  lsq   (const double *A, const double *y, int n, int m, double *x,
                    double *Q);
+#define FILTER_NAN_INPUT (-10)
+#define FILTER_NAN_STATE (-11)
+#define FILTER_NAN_COV   (-12)
+#define FILTER_BAD_COV   (-13)
+#define FILTER_BAD_DIM   (-14)
+#define FILTER_NO_ACTIVE (-15)
+#define FILTER_NO_MEMORY (-16)
+#define FILTER_NOT_PSD (-30)
+#define FILTER_PSD_PRIOR (-31)
+#define FILTER_PSD_R (-32)
+#define FILTER_PSD_S (-33)
+#define FILTER_PSD_POSTERIOR (-34)
+#define PPP_FAILURE_NO_OBS (-20)
+#define PPP_FAILURE_EDIT_LIMIT (-21)
+#define PPP_FAILURE_IEKF_LIMIT (-22)
+#define PPP_FAILURE_IEKF_ROWS (-23)
+#define PPP_EVIDENCE_LLI 1
+#define PPP_EVIDENCE_GF 2
+#define PPP_EVIDENCE_MW 4
+#define PPP_EVIDENCE_DOPPLER 8
+#define PPP_EVIDENCE_GAP 16
+EXPORT void ppp_input_failure_arcs(rtk_t *rtk, const obsd_t *obs, int n);
+EXPORT int numeric_finite(const double *a, size_t count);
+EXPORT int numeric_covariance(const double *P, int n);
+EXPORT int numeric_covariance_psd(const double *P, int n);
+EXPORT const char *filter_reason(int info);
+EXPORT int  filter_active(double *x,double *P,const double *H,const double *v,
+                          const double *R,int n,int m); /* Pii>0 activates valid zero states */
+EXPORT int filter_physical(double *x,double *P,const double *H,const double *v,
+                           const double *R,int n,int m);
+EXPORT int filter_verified(double *x,double *P,const double *H,const double *v,
+                           const double *R,int n,int m);
 EXPORT int  filter(double *x, double *P, const double *H, const double *v,
                    const double *R, int n, int m);
 EXPORT int  smoother(const double *xf, const double *Qf, const double *xb,
@@ -1643,6 +1711,11 @@ EXPORT double tropmapf(gtime_t time, const double *pos, const double *azel,
                        double *mapfw);
 EXPORT int iontec(gtime_t time, const nav_t *nav, const double *pos,
                   const double *azel, int opt, double *delay, double *var);
+#define IONEX_TIME_CORRECTED 0 /* GPST query converted to UTC map epochs */
+#define IONEX_TIME_LEGACY    1 /* reproduce historical GPST/UTC mixing */
+EXPORT int ionex_time_select(nav_t *nav, const char *mode);
+EXPORT gtime_t ionex_query_time(gtime_t gpst, const nav_t *nav);
+EXPORT int ionex_in_range(gtime_t gpst, const nav_t *nav);
 EXPORT void readtec(const char *file, nav_t *nav, int opt);
 EXPORT int ionocorr(gtime_t time, const nav_t *nav, int sat, const double *pos,
                     const double *azel, int ionoopt, double *ion, double *var);
@@ -1657,6 +1730,11 @@ EXPORT pcv_t *searchpcv(int sat, const char *type, gtime_t time,
 EXPORT void antmodel(const pcv_t *pcv, const double *del, const double *azel,
                      int opt, double *dant);
 EXPORT void antmodel_s(const pcv_t *pcv, double nadir, double *dant);
+EXPORT int pcv_antex_pco(const pcv_t *pcv, int frequency_id, double *pco);
+EXPORT int pcv_antex_nadir(const pcv_t *pcv, int frequency_id,
+                          double nadir, double *variation);
+EXPORT int pcv_antex_if_pco(const pcv_t *pcv, int id1, int id2,
+                            double freq1, double freq2, double *pco);
 
 /* earth tide models ---------------------------------------------------------*/
 EXPORT void sunmoonpos(gtime_t tutc, const double *erpv, double *rsun,
@@ -1716,6 +1794,10 @@ EXPORT int  peph2pos(gtime_t time, int sat, const nav_t *nav, int opt,
                      double *rs, double *dts, double *var);
 EXPORT void satantoff(gtime_t time, const double *rs, int sat, const nav_t *nav,
                       double *dant);
+EXPORT void satantpco_delta(gtime_t time, const double *rs, const double *rr,
+                           int sat, const nav_t *nav, const uint8_t *codes,
+                           int n, double *delta, uint8_t *valid);
+EXPORT int bias_clock_ref_status(const nav_t *nav, int sat);
 EXPORT int  satpos(gtime_t time, gtime_t teph, int sat, int ephopt,
                    const nav_t *nav, double *rs, double *dts, double *var,
                    int *svh);
@@ -1932,6 +2014,8 @@ EXPORT int pppambidx(int sat, int f, const prcopt_t *opt);
 EXPORT int pppoutstat(rtk_t *rtk, char *buff);
 EXPORT int pppvmf3load(const char *file0, const char *file1,
                        const char *orog);
+EXPORT int pppvmf3inspect(const char *file0,const char *file1,const char *orog,
+                         gtime_t *first,gtime_t *last);
 
 EXPORT int ppp_ar(rtk_t *rtk, const obsd_t *obs, int n, int *exc,
                   const nav_t *nav, const double *azel, double *x, double *P);

@@ -112,7 +112,11 @@ object PostPppProducts {
         }.maxByOrNull { it.lastModified() }
             ?: throw IllegalArgumentException("缺少 RINEX OBS（不能使用 NAV 代替）")
         val (first, last) = observationPeriod(obs)
-        val nav = choose(files, "NAV", first, last) { it.endsWith("_MN.RNX") || it.endsWith("_MN.RNX.GZ") }
+        // 前一天最新 NAV 也可能包含当前观测可用的星历，不能用文件名的 24h 区间直接拒绝。
+        // 这里只按文件日期选近期候选，实际每颗卫星的 TOE/健康状态仍由 RTKLIB 检查。
+        val navName = BroadcastNavPolicy.candidates(files.map { it.name }, first.toEpochMilli()).firstOrNull()
+            ?: throw IllegalArgumentException("缺少观测日前三天内的可用 NAV 产品")
+        val nav = files.first { it.name == navName }
         val sp3 = choose(files, "SP3", first, last) { it.endsWith("_ORB.SP3") || it.endsWith("_ORB.SP3.GZ") }
         val clk = choose(files, "CLK", first, last) { it.endsWith("_CLK.CLK") || it.endsWith("_CLK.CLK.GZ") }
         val bia = choose(files, "BIA", first, last) { it.endsWith("_OSB.BIA") || it.endsWith("_OSB.BIA.GZ") }

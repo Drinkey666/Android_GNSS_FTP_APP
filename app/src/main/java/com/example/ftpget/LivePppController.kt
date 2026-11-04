@@ -9,6 +9,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
 import java.io.File
+import java.util.Locale
 
 /**
  * 实时输入调度器：一个 Android event → 一次 JNI 转换 → 至多一次 rtkpos。
@@ -27,7 +28,8 @@ class LivePppController(
     private val productDir: File,
     private val dumpDir: File,
     private val onMessage: (String) -> Unit,
-    private val onResult: (LivePppResult) -> Unit
+    private val onResult: (LivePppResult) -> Unit,
+    private val referenceProvider: () -> ReferencePosition? = { null },
 ) {
     private val tag = "LivePppController"
     @Volatile private var running = false // 多线程可见的会话开关，不等于定位成功。
@@ -35,6 +37,42 @@ class LivePppController(
     private var thread: HandlerThread? = null
     private var callback: GnssMeasurementsEvent.Callback? = null
     private var obsDump: File? = null
+    private var solutionDump: File? = null
+    private var errorDump: File? = null
+    private var trackingDump: File? = null
+    private var sessionName = ""
+    private var trackingEventIndex = 0L
+
+    // Independent telemetry: never throw into initialization/filter control.
+    private fun recordTracking(event: GnssMeasurementsEvent) {
+        val file = trackingDump ?: return
+        runCatching {
+            val clock = event.clock
+            val modeAvailable = Build.VERSION.SDK_INT >= 34 && event.hasIsFullTracking()
+            val actualMode = if (modeAvailable) event.isFullTracking.toString() else ""
+            var validAdr = 0
+            var resetAdr = 0
+            var slipAdr = 0
+            var unresolvedHalf = 0
+            for (measurement in event.measurements) {
+                val state = measurement.accumulatedDeltaRangeState
+                if (state and 1 != 0) validAdr++
+                if (state and 2 != 0) resetAdr++
+                if (state and 4 != 0) slipAdr++
+                if (state and 16 != 0 && state and 8 == 0) unresolvedHalf++
+            }
+            trackingEventIndex++
+            file.appendText(listOf(trackingEventIndex, clock.timeNanos,
+                clock.hardwareClockDiscontinuityCount,
+                if (clock.hasFullBiasNanos()) 1 else 0,
+                if (Build.VERSION.SDK_INT >= 31) "true" else "",
+                if (modeAvailable) 1 else 0, actualMode, event.measurements.size,
+                validAdr, resetAdr, slipAdr, unresolvedHalf).joinToString(",") + "\n")
+        }.onFailure {
+            trackingDump = null
+            Log.w(tag, "Tracking metadata disabled after I/O error; PPP continues", it)
+        }
+    }
 
     private fun show(message: String) {
         activity.runOnUiThread { if (running) onMessage(message) }
@@ -51,9 +89,21 @@ class LivePppController(
         // 队列排队不会变成固定的 1 秒输入；输入频率仍由设备事件决定。
         val worker = HandlerThread("PPP-live-worker").apply { start() }
         val handler = Handler(worker.looper)
+        sessionName = "ppp_b_verified_${System.currentTimeMillis()}"
+        trackingEventIndex = 0
+        trackingDump = runCatching {
+            check(dumpDir.isDirectory || dumpDir.mkdirs())
+            File(dumpDir, "$sessionName.tracking.csv").apply {
+                writeText("event_index,clock_time_nanos,hardware_clock_discontinuity_count,has_full_bias,full_tracking_requested,full_tracking_reported,full_tracking,measurement_count,ADR_valid_count,ADR_reset_count,ADR_cycle_slip_count,ADR_half_unresolved_count\n")
+            }
+        }.getOrElse {
+            Log.w(tag, "Tracking metadata unavailable; PPP continues", it)
+            null
+        }
         val listener = object : GnssMeasurementsEvent.Callback() {
             override fun onGnssMeasurementsReceived(event: GnssMeasurementsEvent) {
                 if (!running) return
+                recordTracking(event)
                 try {
                     // 用第一个事件的 Clock 选择产品，不用手机 Date() 替代 GNSS 时间。
                     // 此分支成功后整次会话跳过，不在每个 event 重载文件。
@@ -64,7 +114,11 @@ class LivePppController(
                         }
                         val paths = LivePppProducts.resolve(productDir, event.clock)
                         if (!running) return
-                        if (!LivePppNative.nativeInit(paths)) {
+                        check(dumpDir.isDirectory || dumpDir.mkdirs()) { "无法创建PPP会话目录" }
+                        val session = sessionName
+                        val profile = LivePppNative.nativeProfile()
+                        File(dumpDir, "$session.profile.txt").writeText(profile + "\n" + paths.joinToString("\n"))
+                        if (!LivePppNative.nativeInit(paths, File(dumpDir, "$session.trace").absolutePath)) {
                             val message = "PPP 初始化失败：${LivePppNative.nativeLastError()}"
                             activity.runOnUiThread {
                                 stop()
@@ -77,10 +131,14 @@ class LivePppController(
                             return
                         }
                         initialized = true
-                        dumpDir.mkdirs()
-                        obsDump = File(dumpDir, "ppp_live_obs_${System.currentTimeMillis()}.csv")
+                        obsDump = File(dumpDir, "$session.obs.csv")
                         obsDump?.writeText("week,tow,sat,signal,slot,P_m,L_cycle,D_Hz,CN0_dBHz,LLI,code\n")
+                        solutionDump = File(dumpDir, "$session.solution.csv")
+                        solutionDump?.writeText("week,tow,Q,ns,nobs,x_m,y_m,z_m,lat_deg,lon_deg,h_m,std_x_m,std_y_m,std_z_m,processing_ms\n")
+                        errorDump = File(dumpDir, "$session.errors.csv")
+                        errorDump?.writeText(PositionErrorCsv.header)
                         Log.i(tag, "PPP ready; OBS dump=${obsDump?.absolutePath}")
+                        show("B_VERIFIED 已启动，正在逐历元解算")
                     }
                     // 传入同一事件的公共 Clock 和完整测量集合；不要逐 measurement 调用此函数。
                     val values = LivePppNative.nativeProcessEpoch(
@@ -101,6 +159,15 @@ class LivePppController(
                     // 它是 PPP 输入，不是 Raw，不是最终定位坐标，也不等于每条观测已被滤波接受。
                     obsDump?.appendText(LivePppNative.nativeObsRows())
                     val result = LivePppResult.fromNative(values)
+                    solutionDump?.appendText(String.format(Locale.US,
+                        "%d,%.9f,%d,%d,%d,%.9f,%.9f,%.9f,%.12f,%.12f,%.6f,%.6f,%.6f,%.6f,%.3f\n",
+                        result.week, result.tow, result.q, result.satellites, result.observedSatellites,
+                        result.x, result.y, result.z, result.latitude, result.longitude, result.height,
+                        result.stdX, result.stdY, result.stdZ, result.processingMs))
+                    // Read one immutable reference snapshot AFTER the solution.
+                    // It is never sent to JNI, product selection or initialization.
+                    errorDump?.appendText(PositionErrorCsv.row(referenceProvider(),
+                        SolutionCoordinate.fromLive(result), "LIVE"))
                     activity.runOnUiThread { if (running) onResult(result) }
                 } catch (error: Exception) {
                     Log.e(tag, "Live PPP event failed", error)
@@ -140,7 +207,7 @@ class LivePppController(
         }
         thread = worker
         callback = listener
-        onMessage("等待 GnssMeasurementsEvent…")
+        onMessage("B_VERIFIED：等待 GnssMeasurementsEvent…")
         return true
     }
 

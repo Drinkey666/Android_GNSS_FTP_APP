@@ -24,12 +24,13 @@ set(PPP_LIVE_SOURCES
         "${PPP_LIVE_DIR}/ionex.c"
         "${PPP_LIVE_DIR}/tides.c"
         "${PPP_LIVE_DIR}/sofa.c"
-        "${PPP_LIVE_DIR}/lambda.c"
         "${PPP_LIVE_DIR}/sbas.c"
         "${PPP_LIVE_DIR}/ephemeris.c"
         "${PPP_LIVE_DIR}/geoid.c"
         "${PPP_LIVE_DIR}/solution.c"
-        "${PPP_LIVE_DIR}/trace.c")
+        "${PPP_LIVE_DIR}/trace.c"
+        "${PPP_LIVE_DIR}/ppp_innovation_diag.c"
+        "${PPP_LIVE_DIR}/ppp_filter_diagnostic.c")
 add_library(gnss_ppp_live SHARED gnss_jni.cpp ${PPP_LIVE_SOURCES})
 target_include_directories(gnss_ppp_live PRIVATE "${PPP_LIVE_DIR}")
 target_compile_definitions(gnss_ppp_live PRIVATE TRACE ENAGLO NFREQ=4)
@@ -50,3 +51,13 @@ target_compile_definitions(rtklib_engine PRIVATE TRACE ENAGLO NFREQ=4)
 target_compile_options(rtklib_engine PRIVATE -fsigned-char -fvisibility=hidden)
 target_link_options(rtklib_engine PRIVATE -Wl,-Bsymbolic)
 target_link_libraries(rtklib_engine ${log-lib} m)
+
+# Explicit device-only verifier; absent from normal APK builds.
+option(PPP_BUILD_DEVICE_REPLAY "Build native B_VERIFIED replay verifier" OFF)
+if(PPP_BUILD_DEVICE_REPLAY)
+    add_executable(verified_device_replay tests/verified_device_replay.cpp ${PPP_LIVE_SOURCES})
+    target_include_directories(verified_device_replay PRIVATE "${PPP_LIVE_DIR}")
+    target_compile_definitions(verified_device_replay PRIVATE TRACE ENAGLO NFREQ=4)
+    target_compile_options(verified_device_replay PRIVATE -fsigned-char -fvisibility=hidden)
+    target_link_libraries(verified_device_replay ${log-lib} m)
+endif()

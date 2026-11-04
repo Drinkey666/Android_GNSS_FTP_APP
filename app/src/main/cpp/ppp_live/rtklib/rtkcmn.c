@@ -147,6 +147,7 @@
 #include <stdarg.h>
 #include <ctype.h>
 #include <errno.h>
+#include <float.h>
 #ifndef WIN32
 #include <dirent.h>
 #include <time.h>
@@ -155,6 +156,9 @@
 #include <sys/types.h>
 #endif
 #include "rtklib.h"
+#ifdef ENABLE_FILTER_DIAGNOSTIC
+#include "ppp_filter_diagnostic.h"
+#endif
 
 /* constants -----------------------------------------------------------------*/
 
@@ -1456,34 +1460,191 @@ extern int lsq(const double *A, const double *y, int n, int m, double *x,
 * notes  : matrix stored by column-major order (fortran convention)
 *          if state x[i]==0.0, not updates state x[i]/P[i+i*n]
 *-----------------------------------------------------------------------------*/
+extern int numeric_finite(const double *a, size_t count)
+{
+    size_t i;
+    if (!a) return 0;
+    for (i=0;i<count;i++) if (!isfinite(a[i])) return 0;
+    return 1;
+}
+extern int numeric_covariance(const double *P, int n)
+{
+    int i,j;
+    double scale=1.0;
+    if (n<=0 || !P) return FILTER_BAD_DIM;
+    if (!numeric_finite(P,(size_t)n*n)) return FILTER_NAN_COV;
+    for (i=0;i<n;i++) {
+        if (P[i+i*n]<0.0) return FILTER_BAD_COV;
+        if (P[i+i*n]>scale) scale=P[i+i*n];
+    }
+    /* Basic roundoff-tolerant symmetry gate, not a PSD proof or repair.
+     * No entries are symmetrized or clipped: accepted arithmetic is unchanged. */
+    for (j=0;j<n;j++) for(i=0;i<j;i++)
+        if (fabs(P[i+j*n]-P[j+i*n])>1E-7*scale) return FILTER_BAD_COV;
+    return 0;
+}
+extern const char *filter_reason(int info)
+{
+    switch(info) {
+        case 0:return "OK";
+        case FILTER_NAN_INPUT:return "NAN_INPUT";
+        case FILTER_NAN_STATE:return "NAN_STATE";
+        case FILTER_NAN_COV:return "NAN_COV";
+        case FILTER_BAD_COV:return "BAD_COV";
+        case FILTER_BAD_DIM:return "BAD_DIM";
+        case FILTER_NO_ACTIVE:return "NO_ACTIVE_STATE";
+        case FILTER_NO_MEMORY:return "NO_MEMORY";
+        case FILTER_NOT_PSD:return "NON_PSD_COV";
+        case FILTER_PSD_PRIOR:return "NON_PSD_PRIOR";
+        case FILTER_PSD_R:return "NON_PSD_R";
+        case FILTER_PSD_S:return "NON_PSD_S";
+        case FILTER_PSD_POSTERIOR:return "NON_PSD_POSTERIOR";
+        case PPP_FAILURE_NO_OBS:return "NO_VALID_OBS";
+        case PPP_FAILURE_EDIT_LIMIT:return "EDIT_LIMIT";
+        case PPP_FAILURE_IEKF_LIMIT:return "IEKF_LIMIT";
+        case PPP_FAILURE_IEKF_ROWS:return "IEKF_ROW_CHANGE";
+        default:return "SINGULAR_INNOVATION_COV";
+    }
+}
+/* Read-only, unit-invariant PSD gate. Diagonal congruence converts the active
+ * covariance into a correlation-scale matrix. Complete diagonal pivoting
+ * tests its Schur complements, including a near-zero residual block.
+ * 64*eps*k*||C||inf is a roundoff budget, not a noise/algorithm parameter.
+ * The symmetric part is used for the test only; P is never repaired.
+ * A zero-variance state must have an exactly zero covariance row/column. */
+extern int numeric_covariance_psd(const double *P,int n)
+{
+    double *C,*scale,norm=0.0,tol,pivot,t,value;
+    int *ix,i,j,k=0,q,p,info;
+    if((info=numeric_covariance(P,n)))return info;
+    ix=(int *)malloc((size_t)n*sizeof(int));
+    scale=(double *)malloc((size_t)n*sizeof(double));
+    if(!ix || !scale){free(ix);free(scale);return FILTER_NO_MEMORY;}
+    for(i=0;i<n;i++) {
+        if(P[i+i*n]>0.0){ix[k]=i;scale[k++]=sqrt(P[i+i*n]);}
+        else for(j=0;j<n;j++)if(P[i+j*n]!=0.0 || P[j+i*n]!=0.0) {
+            free(ix);free(scale);return FILTER_NOT_PSD;
+        }
+    }
+    if(!k){free(ix);free(scale);return 0;}
+    C=(double *)malloc((size_t)k*k*sizeof(double));
+    if(!C){free(ix);free(scale);return FILTER_NO_MEMORY;}
+    for(i=0;i<k;i++) {
+        double sum=0.0;
+        for(j=0;j<k;j++) {
+            /* Divide separately to avoid overflowing the scale product. */
+            double a=P[ix[i]+ix[j]*n]/scale[i]/scale[j];
+            double b=P[ix[j]+ix[i]*n]/scale[j]/scale[i];
+            value=0.5*a+0.5*b;
+            if(!isfinite(value) || fabs(a-b)>1E-7*fmax(1.0,fabs(value))) {
+                free(C);free(ix);free(scale);return FILTER_BAD_COV;
+            }
+            C[i+j*k]=value;sum+=fabs(value);
+        }
+        norm=fmax(norm,sum);
+    }
+    tol=64.0*DBL_EPSILON*k*fmax(1.0,norm);
+    info=0;
+    for(q=0;q<k;q++) {
+        p=q;
+        for(i=q+1;i<k;i++)if(C[i+i*k]>C[p+p*k])p=i;
+        if(p!=q) {
+            for(j=0;j<k;j++){t=C[q+j*k];C[q+j*k]=C[p+j*k];C[p+j*k]=t;}
+            for(i=0;i<k;i++){t=C[i+q*k];C[i+q*k]=C[i+p*k];C[i+p*k]=t;}
+        }
+        pivot=C[q+q*k];
+        if(pivot<=tol) {
+            double residual=0.0;
+            for(i=q;i<k;i++) {
+                double sum=0.0;
+                for(j=q;j<k;j++)sum+=fabs(C[i+j*k]);
+                residual=fmax(residual,sum);
+            }
+            if(residual>tol)info=FILTER_NOT_PSD;
+            break;
+        }
+        for(j=q+1;j<k;j++)for(i=j;i<k;i++) {
+            value=C[i+j*k]-(C[i+q*k]/pivot)*C[j+q*k];
+            if(!isfinite(value)){info=FILTER_NAN_COV;break;}
+            C[i+j*k]=C[j+i*k]=value;
+        }
+        if(info)break;
+    }
+    free(C);free(ix);free(scale);return info;
+}
 static int filter_(const double *x, const double *P, const double *H,
                    const double *v, const double *R, int n, int m,
-                   double *xp, double *Pp)
+                   double *xp, double *Pp,int physical)
 {
     double *F=mat(n,m),*Q=mat(m,m),*K=mat(n,m),*I=eye(n);
     int info;
 
     matcpy(Q,R,m,m);
     matcpy(xp,x,n,1);
+    matcpy(Pp,P,n,n); /* Also makes failed diagnostic trials well-defined. */
     matmul("NN",n,m,n,P,H,F);       /* Q=H'*P*H+R */
     matmulp("TN",m,m,n,H,F,Q);
-    if (!(info=matinv(Q,m))) {
+#ifdef ENABLE_FILTER_DIAGNOSTIC
+    ppp_fd_matrix("S",Q,m,m);
+#endif
+    info=numeric_finite(F,(size_t)n*m)?numeric_covariance(Q,m):FILTER_NAN_COV;
+    if(!info && physical) {
+        info=numeric_covariance_psd(Q,m);
+        if(info==FILTER_NOT_PSD)info=FILTER_PSD_S;
+    }
+    if (!info && !(info=matinv(Q,m))) {
         matmul("NN",n,m,m,F,Q,K);   /* K=P*H*Q^-1 */
+#ifdef ENABLE_FILTER_DIAGNOSTIC
+        ppp_fd_matrix("K",K,n,m);
+#endif
         matmulp("NN",n,1,m,K,v,xp);  /* xp=x+K*v */
         matmulm("NT",n,n,m,K,H,I);  /* Pp=(I-K*H')*P */
-        matmul("NN",n,n,n,I,P,Pp);
+        if(physical) {
+            double *AP=(double *)malloc((size_t)n*n*sizeof(double));
+            double *KR=(double *)malloc((size_t)n*m*sizeof(double));
+            if(!AP || !KR)info=FILTER_NO_MEMORY;
+            else {
+                /* Joseph, same K and state update as the original kernel.
+                 * I is A=I-K*H'; H is nx x nv, not nv x nx. */
+                matmul("NN",n,n,n,I,P,AP);
+                matmul("NT",n,n,n,AP,I,Pp);
+                matmul("NN",n,m,m,K,R,KR);
+                matmulp("NT",n,n,m,KR,K,Pp);
+            }
+            free(AP);free(KR);
+        }
+        else matmul("NN",n,n,n,I,P,Pp);
+        if (!info && !numeric_finite(xp,n)) info=FILTER_NAN_STATE;
+        else if(!info)info=physical?numeric_covariance_psd(Pp,n):numeric_covariance(Pp,n);
+        if(physical && info==FILTER_NOT_PSD)info=FILTER_PSD_POSTERIOR;
     }
+#ifdef ENABLE_FILTER_DIAGNOSTIC
+    ppp_fd_filter_end(info,xp,Pp,n);
+#endif
     free(F); free(Q); free(K); free(I);
     return info;
 }
-extern int filter(double *x, double *P, const double *H, const double *v,
-                  const double *R, int n, int m)
+static int filter_masked(double *x,double *P,const double *H,const double *v,
+                         const double *R,int n,int m,int allow_zero,int physical)
 {
     double *x_,*xp_,*P_,*Pp_,*H_;
     int i,j,k,info,*ix;
 
+    if (n<=0 || m<=0 || !x || !P || !H || !v || !R) return FILTER_BAD_DIM;
+    if (!numeric_finite(v,m) || !numeric_finite(H,(size_t)n*m))
+        return FILTER_NAN_INPUT;
+    if (!numeric_finite(x,n)) return FILTER_NAN_STATE;
+    if ((info=numeric_covariance(P,n)) || (info=numeric_covariance(R,m))) return info;
+    if(physical) {
+        if((info=numeric_covariance_psd(P,n)))
+            return info==FILTER_NOT_PSD?FILTER_PSD_PRIOR:info;
+        if((info=numeric_covariance_psd(R,m)))
+            return info==FILTER_NOT_PSD?FILTER_PSD_R:info;
+    }
+
     /* create list of non-zero states */
-    ix=imat(n,1); for (i=k=0;i<n;i++) if (x[i]!=0.0&&P[i+i*n]>0.0) ix[k++]=i;
+    ix=imat(n,1); for (i=k=0;i<n;i++) if ((allow_zero || x[i]!=0.0)&&P[i+i*n]>0.0) ix[k++]=i;
+    if (!k) {free(ix);return FILTER_NO_ACTIVE;}
     x_=mat(k,1); xp_=mat(k,1); P_=mat(k,k); Pp_=mat(k,k); H_=mat(k,m);
     /* compress array by removing zero elements to save computation time */
     for (i=0;i<k;i++) {
@@ -1492,15 +1653,35 @@ extern int filter(double *x, double *P, const double *H, const double *v,
         for (j=0;j<m;j++) H_[i+j*k]=H[ix[i]+j*n];
     }
     /* do kalman filter state update on compressed arrays */
-    info=filter_(x_,P_,H_,v,R,k,m,xp_,Pp_);
+#ifdef ENABLE_FILTER_DIAGNOSTIC
+    ppp_fd_filter_begin(x_,P_,H_,v,R,n,m,ix,k,allow_zero);
+#endif
+    info=filter_(x_,P_,H_,v,R,k,m,xp_,Pp_,physical);
     /* copy values from compressed arrays back to full arrays */
-    for (i=0;i<k;i++) {
+    for (i=0;!info && i<k;i++) {
         x[ix[i]]=xp_[i];
         for (j=0;j<k;j++) P[ix[i]+ix[j]*n]=Pp_[i+j*k];
     }
     free(ix); free(x_); free(xp_); free(P_); free(Pp_); free(H_);
     return info;
 }
+/* Legacy filter keeps its exact active-state convention and arithmetic. */
+extern int filter(double *x,double *P,const double *H,const double *v,
+                  const double *R,int n,int m)
+{return filter_masked(x,P,H,v,R,n,m,0,0);}
+extern int filter_active(double *x,double *P,const double *H,const double *v,
+                         const double *R,int n,int m)
+{return filter_masked(x,P,H,v,R,n,m,1,0);}
+/* Explicit production entry for PHYSICAL only. Failed trials are atomic.
+ * Legacy filter/filter_active retain their formula, gain and activation. */
+extern int filter_physical(double *x,double *P,const double *H,const double *v,
+                           const double *R,int n,int m)
+{return filter_masked(x,P,H,v,R,n,m,1,1);}
+/* Verified B: Joseph/PSD safety with the original B zero-state mask.
+ * Keep this separate from filter_physical(), which activates valid zero states. */
+extern int filter_verified(double *x,double *P,const double *H,const double *v,
+                           const double *R,int n,int m)
+{return filter_masked(x,P,H,v,R,n,m,0,1);}
 /* smoother --------------------------------------------------------------------
 * combine forward and backward filters by fixed-interval smoother as follows:
 *
@@ -2536,7 +2717,7 @@ static int readantex(const char *file, pcvs_t *pcvs)
     static const pcv_t pcv0={0};
     pcv_t pcv;
     double neu[3];
-    int i,f,freq=0,state=0,freqs[]={1,2,5,0};
+    int i,f,freq=0,physfreq=0,state=0,freqs[]={1,2,5,0};
     char buff[256];
 
     trace(3,"readantex: file=%s\n",file);
@@ -2573,9 +2754,10 @@ static int readantex(const char *file, pcvs_t *pcvs)
             if (!str2time(buff,0,43,&pcv.te)) continue;
         }
         else if (strstr(buff+60,"START OF FREQUENCY")) {
-            freq=0;
+            freq=physfreq=0;
             if (!pcv.sat&&buff[3]!='G') continue; /* only read rec ant for GPS */
             if (sscanf(buff+4,"%d",&f)<1) continue;
+            if (pcv.sat && f>0 && f<MAX_ANTEX_FREQ) physfreq=f;
             if (satsys(pcv.sat,NULL)==SYS_CMP) {
                 /* ANTEX C02=B1I, C07=B2b, C05=B2a, C01=B1C.
                  * Numeric ANTEX IDs are not RTKLIB array indices. */
@@ -2592,16 +2774,34 @@ static int readantex(const char *file, pcvs_t *pcvs)
             }
         }
         else if (strstr(buff+60,"END OF FREQUENCY")) {
-            freq=0;
+            freq=physfreq=0;
         }
         else if (strstr(buff+60,"NORTH / EAST / UP")) {
-            if (freq<1||NFREQ<freq) continue;
+            if ((!physfreq) && (freq<1||NFREQ<freq)) continue;
             if (decodef(buff,3,neu)<3) continue;
-            pcv.off[freq-1][0]=neu[pcv.sat?0:1]; /* x or e */
-            pcv.off[freq-1][1]=neu[pcv.sat?1:0]; /* y or n */
-            pcv.off[freq-1][2]=neu[2];           /* z or u */
+            if (physfreq && isfinite(neu[0]) && isfinite(neu[1]) && isfinite(neu[2])) {
+                for(i=0;i<3;i++)pcv.antex_pco[physfreq][i]=neu[i];
+                pcv.antex_pco_mask|=(uint16_t)(1u<<physfreq);
+            }
+            if (freq>=1&&freq<=NFREQ) {
+                pcv.off[freq-1][0]=neu[pcv.sat?0:1]; /* x or e */
+                pcv.off[freq-1][1]=neu[pcv.sat?1:0]; /* y or n */
+                pcv.off[freq-1][2]=neu[2];           /* z or u */
+            }
         }
         else if (strstr(buff,"NOAZI")) {
+            if (physfreq) {
+                /* decodef() tokenizes its input in place. Preserve buff for
+                 * the historical slot parser below. */
+                char copy[sizeof(buff)];double physical[19];int count;
+                memcpy(copy,buff,sizeof(buff));
+                count=decodef(copy+8,19,physical);
+                if (count>0) {
+                    for (i=count;i<19;i++) physical[i]=physical[i-1];
+                    memcpy(pcv.antex_pcv[physfreq],physical,sizeof(physical));
+                    pcv.antex_pcv_mask|=(uint16_t)(1u<<physfreq);
+                }
+            }
             if (freq<1||NFREQ<freq) continue;
             if ((i=decodef(buff+8,19,pcv.var[freq-1]))<=0) continue;
             for (;i<19;i++) pcv.var[freq-1][i]=pcv.var[freq-1][i-1];
@@ -2610,6 +2810,34 @@ static int readantex(const char *file, pcvs_t *pcvs)
     fclose(fp);
 
     return 1;
+}
+/* Satellite PCO by ANTEX physical frequency ID.  These accessors are pure;
+ * the legacy PPP geometry still uses pcv.off[] until its full product datum
+ * and observation correction convention have been verified. */
+extern int pcv_antex_pco(const pcv_t *pcv,int frequency_id,double *pco)
+{
+    if(!pcv || !pco || !pcv->sat || frequency_id<1 ||
+       frequency_id>=MAX_ANTEX_FREQ ||
+       !(pcv->antex_pco_mask&(1u<<frequency_id)))return 0;
+    memcpy(pco,pcv->antex_pco[frequency_id],3*sizeof(double));
+    return 1;
+}
+extern int pcv_antex_if_pco(const pcv_t *pcv,int id1,int id2,
+                            double freq1,double freq2,double *pco)
+{
+    double first[3],second[3],denom,c1,c2,result[3];int i;
+    if(!pco || !isfinite(freq1) || !isfinite(freq2) ||
+       freq1<=0.0 || freq2<=0.0 || freq1==freq2 ||
+       !pcv_antex_pco(pcv,id1,first) ||
+       !pcv_antex_pco(pcv,id2,second))return 0;
+    denom=SQR(freq1)-SQR(freq2);
+    if(!isfinite(denom) || denom==0.0)return 0;
+    c1=SQR(freq1)/denom;c2=-SQR(freq2)/denom;
+    for(i=0;i<3;i++) {
+        result[i]=c1*first[i]+c2*second[i];
+        if(!isfinite(result[i]))return 0;
+    }
+    memcpy(pco,result,sizeof(result));return 1;
 }
 /* read antenna parameters ------------------------------------------------------
 * read antenna parameters
@@ -3888,6 +4116,17 @@ static double interpvar(double ang, const double *var)
     if (i<0) return var[0]; else if (i>=18) return var[18];
     return var[i]*(1.0-a+i)+var[i+1]*(a-i);
 }
+/* Satellite NOAZI PCV addressed by ANTEX physical band, independent of the
+ * observation slot used by RTKLIB.  ANTEX nadir tables are sampled at 1 deg. */
+extern int pcv_antex_nadir(const pcv_t *pcv,int frequency_id,double nadir,
+                           double *variation)
+{
+    if(!pcv || !variation || !pcv->sat || frequency_id<1 ||
+       frequency_id>=MAX_ANTEX_FREQ || !isfinite(nadir) ||
+       !(pcv->antex_pcv_mask&(1u<<frequency_id)))return 0;
+    *variation=interpvar(nadir*R2D*5.0,pcv->antex_pcv[frequency_id]);
+    return isfinite(*variation);
+}
 /* receiver antenna model ------------------------------------------------------
 * compute antenna offset by antenna phase center parameters
 * args   : pcv_t *pcv       I   antenna phase center parameters
@@ -4156,3 +4395,4 @@ extern int rtk_uncompress(const char *file, char *uncfile)
     return stat;
 }
 /* dummy application functions for shared library ----------------------------*/
+

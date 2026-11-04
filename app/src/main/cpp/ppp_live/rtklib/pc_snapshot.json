@@ -1,0 +1,140 @@
+{
+  "profile": "B_VERIFIED_v2_JOSEPH",
+  "pc_root": "E:\\GNSS\\PPP_only",
+  "backup": "E:\\android\\test\\FTPGet\\tools\\ppp_sync_backups\\b_verified_20261020_160100",
+  "files": {
+    "smartphone_ppp_config.c": {
+      "source": "E:\\GNSS\\PPP_only\\src\\smartphone_ppp_config.c",
+      "raw_sha256": "967ed655465557f22a9ce12604529089de24714a37100d7342d91c665057d020"
+    },
+    "smartphone_ppp_config.h": {
+      "source": "E:\\GNSS\\PPP_only\\src\\smartphone_ppp_config.h",
+      "raw_sha256": "f7ba089674dd295c9afc368e98876a8dc67bf2755eb8eda85a934570e2e87372"
+    },
+    "rtklib.h": {
+      "source": "E:\\GNSS\\PPP_only\\src\\rtklib.h",
+      "raw_sha256": "9a3bb7c873a0bbff389153ba80b71c1c6a91b9001fcff353c1c2cc0358b2ac53"
+    },
+    "gnss_raw.h": {
+      "source": "E:\\GNSS\\PPP_only\\src\\gnss_raw.h",
+      "raw_sha256": "407bbeaf7d21a199b31fc1ca4a8547720b759ab9207968ffbaaaa61ec55d48f8"
+    },
+    "gnss_adapter.c": {
+      "source": "E:\\GNSS\\PPP_only\\src\\gnss_adapter.c",
+      "raw_sha256": "7431e9b49ba555ddee80511ec9255ded60caf9e5544b5d2ef3eae7b05c9afaa4"
+    },
+    "gnss_adapter.h": {
+      "source": "E:\\GNSS\\PPP_only\\src\\gnss_adapter.h",
+      "raw_sha256": "becf8da52c9a470c48031e62dcc8c42c21f964385c01310e11d6c4766ec87c36"
+    },
+    "gnss_signal_policy.c": {
+      "source": "E:\\GNSS\\PPP_only\\src\\gnss_signal_policy.c",
+      "raw_sha256": "26c87c7db35274a49f2fdbb44a8b7aad5994ec2d4fc8ddfdc616248e82a74d5d"
+    },
+    "gnss_signal_policy.h": {
+      "source": "E:\\GNSS\\PPP_only\\src\\gnss_signal_policy.h",
+      "raw_sha256": "d69b5738e1e248e76e3b0cbb2b8c4f62a3df7e2e0397e44632b09343e50b663e"
+    },
+    "rtkcmn.c": {
+      "source": "E:\\GNSS\\PPP_only\\src\\rtkcmn.c",
+      "raw_sha256": "47f07c3d2d374642f2c4363fa82e9b59f869b3358faadcf17bccd9e257b3425c"
+    },
+    "rtkpos.c": {
+      "source": "E:\\GNSS\\PPP_only\\PPP_only\\ppp_position.c",
+      "raw_sha256": "4ce8534d43dbfb25c6019fadc4f46b6e8d2d5fbe38c45742e94fca8adbeea569"
+    },
+    "ppp.c": {
+      "source": "E:\\GNSS\\PPP_only\\src\\ppp.c",
+      "raw_sha256": "9764a2ec4285d147404fab0a0a6a60ef98766e31a23ae644cb780c132012fdca"
+    },
+    "ppp_ar.c": {
+      "source": "E:\\GNSS\\PPP_only\\src\\ppp_ar.c",
+      "raw_sha256": "3f51766e7dead974a997d824166a5219049fdd9a47f4443d133bf69648113daf"
+    },
+    "pntpos.c": {
+      "source": "E:\\GNSS\\PPP_only\\src\\pntpos.c",
+      "raw_sha256": "05cf53c2fb51da93b413bb1b878a4b28c40cea412ec52c4d4f7b7034c56907fd"
+    },
+    "preceph.c": {
+      "source": "E:\\GNSS\\PPP_only\\src\\preceph.c",
+      "raw_sha256": "bb00474d5c98fa18266a2fc53fa5c118ff0c82fbd3a4e6c38961f843ff9beb85"
+    },
+    "rinex.c": {
+      "source": "E:\\GNSS\\PPP_only\\src\\rinex.c",
+      "raw_sha256": "e73b47f921389722d335dd9b1df7260f0a35b0d6625f4f8c0d0dae1f8c6e1fc0"
+    },
+    "ionex.c": {
+      "source": "E:\\GNSS\\PPP_only\\src\\ionex.c",
+      "raw_sha256": "aa648af3ad1c7336e149e8f1d5e824bbe84eda576610ca66c84cada79712461d"
+    },
+    "tides.c": {
+      "source": "E:\\GNSS\\PPP_only\\src\\tides.c",
+      "raw_sha256": "0f60dbca2441f5adf5bb1f8d8a601a976908a9cfbb41f58c90558be6f1937441"
+    },
+    "sofa.c": {
+      "source": "E:\\GNSS\\PPP_only\\src\\sofa.c",
+      "raw_sha256": "cac2c821f3f04e8d9abe0433d897201453be2d1473fb9929d3089d1d0c27f3a6"
+    },
+    "sbas.c": {
+      "source": "E:\\GNSS\\PPP_only\\src\\sbas.c",
+      "raw_sha256": "b596c1302375c5b7fb6dd3452c51765e40b504d13909f07cf912188b148fcf6d"
+    },
+    "ephemeris.c": {
+      "source": "E:\\GNSS\\PPP_only\\src\\ephemeris.c",
+      "raw_sha256": "8315cf1e38f943f68732db996d5dd08936855616cec247fca7a60f8e3384dd6b"
+    },
+    "geoid.c": {
+      "source": "E:\\GNSS\\PPP_only\\src\\geoid.c",
+      "raw_sha256": "e01969bf760748efaf306add92ced0d15afa23c324595adbaebe8bd45bd7fce3"
+    },
+    "solution.c": {
+      "source": "E:\\GNSS\\PPP_only\\src\\solution.c",
+      "raw_sha256": "11f694edc1ce405cf98204c67be757352c6543eaf56c16f8885836a517a24b58"
+    },
+    "trace.c": {
+      "source": "E:\\GNSS\\PPP_only\\src\\trace.c",
+      "raw_sha256": "6461b52ef91a0becc9b69cd2ebe5a7df6c43ee46f2fb1f2278ac5ca945744204"
+    },
+    "postpos.c": {
+      "source": "E:\\GNSS\\PPP_only\\src\\postpos.c",
+      "raw_sha256": "99b61e34854e59bbdde8825916c49a4b2cbebef6794f4b26486a28c21071e5c3"
+    },
+    "rtcm.c": {
+      "source": "E:\\GNSS\\PPP_only\\src\\rtcm.c",
+      "raw_sha256": "d54dcd8b85a6a6cb58648cec7dad1223c57d51cc41a48d57d755e88d0a4c399e"
+    },
+    "rtcm2.c": {
+      "source": "E:\\GNSS\\PPP_only\\src\\rtcm2.c",
+      "raw_sha256": "4cd5996b7d05eb6fe6e77d2821d8db724823ec54c60136bbd37a49c640db60f6"
+    },
+    "rtcm3.c": {
+      "source": "E:\\GNSS\\PPP_only\\src\\rtcm3.c",
+      "raw_sha256": "dd93fcb0d278fc0ade0abe77934ba78e2cd56a44080cf550898f009a844efda2"
+    },
+    "rtcm3e.c": {
+      "source": "E:\\GNSS\\PPP_only\\src\\rtcm3e.c",
+      "raw_sha256": "b401d39ceceeaab7ba591fc506b07120e24dccbaf6f3c019ca06719418c17010"
+    },
+    "ppp_innovation_diag.c": {
+      "source": "E:\\GNSS\\PPP_only\\src\\ppp_innovation_diag.c",
+      "raw_sha256": "48b9ea539b554603d0f9b45d8f024f2b0f78a6f1c96ce4cb8833f1bc17f641d9"
+    },
+    "ppp_innovation_diag.h": {
+      "source": "E:\\GNSS\\PPP_only\\src\\ppp_innovation_diag.h",
+      "raw_sha256": "22ee240b49e4315ae65a443a22b7f6456db66e2bb449148814f0f9a0908bd24d"
+    },
+    "ppp_filter_diagnostic.c": {
+      "source": "E:\\GNSS\\PPP_only\\src\\ppp_filter_diagnostic.c",
+      "raw_sha256": "60069346ccc2452a2eda84f3de44e45bfb5ad5b6f47e72740d542d4878f661c3"
+    },
+    "ppp_filter_diagnostic.h": {
+      "source": "E:\\GNSS\\PPP_only\\src\\ppp_filter_diagnostic.h",
+      "raw_sha256": "97734e4fd89001ac2a0ee3f72b97346a5292afae7ff8624c4e953e9fb328bc71"
+    },
+    "gnss_clock_reference.h": {
+      "source": "E:\\GNSS\\PPP_only\\src\\gnss_clock_reference.h",
+      "raw_sha256": "7a94a1a37fd8bb517e426e0ca27cd0cb2456452177b1ba566cf40998c8b4bdd1"
+    }
+  },
+  "observation_generation": "FIXED_CLOCK_2023"
+}

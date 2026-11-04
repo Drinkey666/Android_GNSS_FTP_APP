@@ -17,8 +17,10 @@ typedef struct {
     double bias_nanos;
     int has_full_bias;
     int hardware_clock_discontinuity_count;
-    int64_t clock_correction_nanos; /* explicit correction for silent clock jumps */
-    int clock_discontinuity; /* synthetic discontinuity at this epoch */
+    int64_t clock_correction_nanos; /* deprecated: fixed-reference generation always sets zero */
+    int clock_discontinuity; /* explicitly confirmed hardware-clock discontinuity */
+    int leap_seconds,has_leap_seconds; /* GPS-UTC, optional; date table fallback when absent */
+    int reference_segment; /* 0=raw API; >0=already normalized, do not apply reference twice */
 } android_clock_t;
 
 typedef struct {
@@ -36,6 +38,7 @@ typedef struct {
     double adr_uncertainty_meters;
     double carrier_frequency_hz;
     char code_type[8];
+    int sv_time_status; /* 1=present, -1=missing, 0=legacy unannotated fixture */
 } android_meas_t;
 
 #endif

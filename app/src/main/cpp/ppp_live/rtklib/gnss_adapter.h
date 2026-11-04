@@ -2,17 +2,37 @@
 #define GNSS_ADAPTER_H
 
 #include "gnss_raw.h"
+#include "gnss_clock_reference.h"
 #include "rtklib.h"
+
+enum {
+    GNSS_RESET_CLOCK = 1,
+    GNSS_RESET_ADR = 2,
+    GNSS_RESET_SIGNAL = 4
+};
 
 typedef struct {
     int input_meas, unsupported, code_valid, phase_valid, doppler_valid;
     int invalid_time, duplicate, overflow;
     int phase_rejected_unc, phase_lli_slip;
     int lli_android, lli_clock;
+    int invalid_clock,time_conflicts,phase_zero_sentinel;
 } gnss_adapter_stats_t;
 
 typedef struct {
+    gnss_clock_reference_t clock_reference;
     int last_hcdc, have_hcdc;
+    /* Reset evidence outlives a missing/rejected measurement. GNSS_RESET_* bits
+     * are forwarded until P/L are emitted;
+     * the PPP core then owns pending ambiguity initialization. */
+    uint8_t pending_reset[MAXSAT][NFREQ];
+    /* Highest handoff stage: 0=none, 1=no phase, 2=phase only. Do not count
+     * retained evidence as a new slip on every missing-observation epoch. */
+    uint8_t reset_forwarded[MAXSAT][NFREQ];
+    uint8_t last_phase_code[MAXSAT][NFREQ];
+    uint32_t last_adr_state[MAXSAT][NFREQ];
+    uint8_t have_adr_state[MAXSAT][NFREQ];
+    double last_phase_frequency[MAXSAT][NFREQ];
     double adr_unc_max;
     int adr_unc_off;
     int rinex_compatible;

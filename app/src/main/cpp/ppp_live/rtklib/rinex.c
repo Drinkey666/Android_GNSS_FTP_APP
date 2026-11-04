@@ -149,6 +149,7 @@ static const double ura_nominal[]={     /* URA nominal values */
 /* type definition -----------------------------------------------------------*/
 typedef struct {                        /* signal index type */
     int n;                              /* number of index */
+    int keep_phase_identity;            /* explicit RINEX3 -PPP_PHASE_ID */
     int idx[MAXOBSTYPE];                /* signal freq-index */
     int pos[MAXOBSTYPE];                /* signal index in obs data (-1:no) */
     uint8_t pri [MAXOBSTYPE];           /* signal priority (15-0) */
@@ -891,7 +892,9 @@ static int decode_obsdata(FILE *fp, char *buff, double ver, int mask,
                     obs->code[p[i]]=ind->code[i];
                     obs->Pstd[p[i]]=std[i]>0?std[i]:0;
                     break;
-            case 1: obs->L[p[i]]=val[i];
+            case 1: if(ver>2.99 && ind->keep_phase_identity && obs->code[p[i]]==CODE_NONE)
+                        obs->code[p[i]]=ind->code[i];
+                    obs->L[p[i]]=val[i];
                     obs->LLI[p[i]]=lli[i];
                     obs->Lstd[p[i]]=std[i]>0?std[i]:0;
                     break;
@@ -969,6 +972,18 @@ static void set_index(double ver, int sys, const char *opt,
     double shift;
     int i,j,k,n;
 
+    /* A selected carrier retains its exact signal when only its C is absent.
+     * Default reader semantics and signal priorities remain reproducible. */
+    ind->keep_phase_identity=0;
+    if(opt) {
+        const char *flag=opt;
+        while((flag=strstr(flag,"-PPP_PHASE_ID"))) {
+            if((flag==opt || flag[-1]==' ') && (flag[13]=='\0' || flag[13]==' ')) {
+                ind->keep_phase_identity=1;break;
+            }
+            flag+=13;
+        }
+    }
     for (i=n=0;*tobs[i];i++,n++) {
         ind->code[i]=obs2code(tobs[i]+1);
         ind->type[i]=(p=strchr(obscodes,tobs[i][0]))?(int)(p-obscodes):0;

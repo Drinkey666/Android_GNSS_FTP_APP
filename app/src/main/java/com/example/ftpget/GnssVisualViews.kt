@@ -32,12 +32,12 @@ internal fun satelliteSystem(type: Int): String = when (type) {
     else -> "?"
 }
 
-internal fun satelliteColor(system: String): Int = when (system) {
-    "G" -> Color.rgb(27, 103, 203)
-    "R" -> Color.rgb(217, 70, 73)
-    "E" -> Color.rgb(25, 151, 120)
-    "C" -> Color.rgb(236, 151, 40)
-    else -> Color.rgb(129, 89, 180)
+internal fun satelliteColor(system: String, dark: Boolean = false): Int = when (system) {
+    "G" -> if (dark) Color.rgb(132, 178, 233) else Color.rgb(45, 98, 167)
+    "R" -> if (dark) Color.rgb(239, 154, 160) else Color.rgb(171, 70, 81)
+    "E" -> if (dark) Color.rgb(123, 211, 188) else Color.rgb(24, 119, 98)
+    "C" -> if (dark) Color.rgb(241, 193, 113) else Color.rgb(155, 103, 30)
+    else -> if (dark) Color.rgb(195, 165, 231) else Color.rgb(115, 78, 158)
 }
 
 class SkyPlotView @JvmOverloads constructor(
@@ -45,7 +45,12 @@ class SkyPlotView @JvmOverloads constructor(
 ) : View(context, attrs) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private var satellites: List<SatelliteDisplay> = emptyList()
+    private var palette = GnssViewPalette.initial()
     private val density = resources.displayMetrics.density
+
+    fun setPalette(colors: GnssViewPalette) {
+        if (palette != colors) { palette = colors; invalidate() }
+    }
 
     fun updateSatellites(items: List<SatelliteDisplay>) {
         satellites = items
@@ -54,41 +59,52 @@ class SkyPlotView @JvmOverloads constructor(
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
+        canvas.drawColor(palette.background)
         val cx = width / 2f
         val cy = height / 2f
-        val radius = min(width, height) * 0.39f
+        val radius = min(min(width, height) * 0.39f,
+            min(width, height) / 2f - 28f * density).coerceAtLeast(0f)
 
         paint.style = Paint.Style.STROKE
+        for (ring in 1..3) {
+            paint.strokeWidth = if (ring == 3) 1.5f * density else density
+            paint.color = if (ring == 3) palette.muted else palette.grid
+            paint.alpha = if (ring == 3) 155 else 255
+            canvas.drawCircle(cx, cy, radius * ring / 3f, paint)
+        }
+        paint.alpha = 255
         paint.strokeWidth = density
-        paint.color = Color.rgb(210, 204, 222)
-        for (ring in 1..3) canvas.drawCircle(cx, cy, radius * ring / 3f, paint)
+        paint.color = palette.grid
         canvas.drawLine(cx - radius, cy, cx + radius, cy, paint)
         canvas.drawLine(cx, cy - radius, cx, cy + radius, paint)
 
         paint.style = Paint.Style.FILL
-        paint.color = Color.rgb(86, 69, 123)
+        paint.color = palette.muted
         paint.textAlign = Paint.Align.CENTER
         paint.textSize = 12f * density
-        canvas.drawText("N", cx, cy - radius - 12f * density, paint)
-        canvas.drawText("S", cx, cy + radius + 20f * density, paint)
-        canvas.drawText("W", cx - radius - 14f * density, cy + 4f * density, paint)
-        canvas.drawText("E", cx + radius + 14f * density, cy + 4f * density, paint)
+        canvas.drawText("N", cx + 20f * density, cy - radius - 12f * density, paint)
+        canvas.drawText("S", cx + 20f * density, cy + radius + 20f * density, paint)
+        canvas.drawText("W", cx - radius - 22f * density, cy + 4f * density, paint)
+        canvas.drawText("E", cx + radius + 22f * density, cy + 4f * density, paint)
+        canvas.drawCircle(cx, cy, 2f * density, paint)
 
         for (sat in satellites) {
             val angle = Math.toRadians(sat.azimuth.toDouble())
             val distance = radius * (90f - sat.elevation.coerceIn(0f, 90f)) / 90f
             val x = cx + distance * sin(angle).toFloat()
             val y = cy - distance * cos(angle).toFloat()
-            paint.color = satelliteColor(sat.system)
-            paint.alpha = if (sat.usedInFix) 255 else 165
-            canvas.drawCircle(x, y, 13f * density, paint)
-            paint.alpha = 255
-            paint.color = Color.WHITE
+            val color = satelliteColor(sat.system, palette.dark)
+            paint.color = color
+            paint.style = if (sat.usedInFix) Paint.Style.FILL else Paint.Style.STROKE
+            paint.strokeWidth = 2f * density
+            canvas.drawCircle(x, y, 12f * density, paint)
+            paint.style = Paint.Style.FILL
+            paint.color = if (sat.usedInFix) palette.satelliteText else color
             paint.textSize = 9f * density
             canvas.drawText("${sat.system}${sat.svid}", x, y + 3f * density, paint)
         }
         if (satellites.isEmpty()) {
-            paint.color = Color.rgb(116, 111, 130)
+            paint.color = palette.muted
             paint.textSize = 12f * density
             canvas.drawText("等待卫星信号", cx, cy + 5f * density, paint)
         }
@@ -100,7 +116,12 @@ class SignalBarView @JvmOverloads constructor(
 ) : View(context, attrs) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private var satellites: List<SatelliteDisplay> = emptyList()
+    private var palette = GnssViewPalette.initial()
     private val density = resources.displayMetrics.density
+
+    fun setPalette(colors: GnssViewPalette) {
+        if (palette != colors) { palette = colors; invalidate() }
+    }
 
     fun updateSatellites(items: List<SatelliteDisplay>) {
         satellites = items.groupBy { it.system }
@@ -111,37 +132,50 @@ class SignalBarView @JvmOverloads constructor(
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        val left = 30f * density
-        val top = 16f * density
-        val bottom = height - 35f * density
-        val right = width - 10f * density
+        canvas.drawColor(palette.background)
+        val left = 64f * density
+        val right = (width - 44f * density).coerceAtLeast(left + density)
+        val top = 34f * density
+        val bottom = (height - 12f * density).coerceAtLeast(top + density)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = density
         paint.textAlign = Paint.Align.CENTER
-        paint.textSize = 10f * density
+        paint.textSize = 9f * density
         for (value in 0..5) {
-            val y = bottom - (bottom - top) * value / 5f
-            paint.color = Color.rgb(225, 221, 233)
-            paint.strokeWidth = density
-            canvas.drawLine(left, y, right, y, paint)
-            paint.color = Color.rgb(116, 111, 130)
-            canvas.drawText("${value * 10}", left - 16f * density, y + 3f * density, paint)
+            val x = left + (right - left) * value / 5f
+            paint.color = palette.grid
+            canvas.drawLine(x, top, x, bottom, paint)
+            paint.style = Paint.Style.FILL
+            paint.color = palette.muted
+            canvas.drawText("${value * 10}", x, 22f * density, paint)
+            paint.style = Paint.Style.STROKE
         }
+        paint.style = Paint.Style.FILL
         if (satellites.isEmpty()) {
-            paint.color = Color.rgb(116, 111, 130)
+            paint.color = palette.muted
             paint.textSize = 12f * density
+            paint.textAlign = Paint.Align.CENTER
             canvas.drawText("等待信号强度数据", width / 2f, height / 2f, paint)
             return
         }
-        val cell = (right - left) / satellites.size
-        val barWidth = min(40f * density, cell * 0.55f)
+        val rowHeight = (bottom - top) / satellites.size
         satellites.forEachIndexed { index, sat ->
-            val x = left + cell * (index + 0.5f)
-            val barHeight = (bottom - top) * sat.cn0.coerceIn(0f, 50f) / 50f
-            paint.color = satelliteColor(sat.system)
-            canvas.drawRoundRect(RectF(x - barWidth / 2, bottom - barHeight,
-                x + barWidth / 2, bottom), 4f * density, 4f * density, paint)
-            paint.color = Color.rgb(36, 32, 51)
-            canvas.drawText("${sat.system}${sat.svid}", x, bottom + 16f * density, paint)
-            canvas.drawText("${sat.cn0.toInt()}", x, bottom - barHeight - 5f * density, paint)
+            val y = top + rowHeight * (index + 0.5f)
+            paint.textAlign = Paint.Align.LEFT
+            paint.textSize = 11f * density
+            paint.color = palette.foreground
+            canvas.drawText("${sat.system}${sat.svid}", 12f * density, y + 4f * density, paint)
+            paint.color = palette.header
+            canvas.drawRoundRect(RectF(left, y - 6f * density,
+                right, y + 6f * density), 6f * density, 6f * density, paint)
+            paint.color = satelliteColor(sat.system, palette.dark)
+            val filled = left + (right - left) * sat.cn0.coerceIn(0f, 50f) / 50f
+            canvas.drawRoundRect(RectF(left, y - 6f * density,
+                filled, y + 6f * density), 6f * density, 6f * density, paint)
+            paint.textAlign = Paint.Align.RIGHT
+            paint.textSize = 11f * density
+            paint.color = palette.foreground
+            canvas.drawText("${sat.cn0.toInt()}", width - 12f * density, y + 4f * density, paint)
         }
     }
 }

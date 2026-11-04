@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include "rtklib.h"
 #include "smartphone_ppp_config.h"
+#include "android_b_verified.h"
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "PPP_POST", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "PPP_POST", __VA_ARGS__)
@@ -73,7 +74,13 @@ Java_com_example_ftpget_RtkEngine_runPpp(JNIEnv *env, jobject thiz,
             goto done;
         }
     }
-    smartphone_ppp_configure(&opt, &sol);
+    {
+        char error[256];
+        if (!android_b_verified_configure(&opt, &sol, error, sizeof(error))) {
+            LOGE("B_VERIFIED configuration failed: %s", error);
+            goto done;
+        }
+    }
     if (!set_path(filopt.satantp, sizeof(filopt.satantp), paths[9]) ||
         !set_path(filopt.iono, sizeof(filopt.iono), paths[5]) ||
         !set_path(filopt.dcb, sizeof(filopt.dcb), paths[4])) {

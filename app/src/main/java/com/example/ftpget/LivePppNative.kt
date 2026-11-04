@@ -12,7 +12,8 @@ object LivePppNative {
 
     // 固定九路径顺序：NAV、SP3、CLK、BIA、IONEX、VMF3左期、右期、格网椭球高程、ATX。
     // 下标顺序是 ABI 契约，不能按文件扩展名随意重新排序；true 表示初始化成功。
-    external fun nativeInit(productPaths: Array<String>): Boolean
+    external fun nativeInit(productPaths: Array<String>, tracePath: String): Boolean
+    external fun nativeProfile(): String // fixed B_VERIFIED; includes Joseph/repair signature
     // clock 是全事件公共时钟；measurements 是卫星×信号集合，不是“一颗卫星一个对象”。
     // null 表示此事件处理失败/被跳过，先读取 nativeLastError；非 null 数组固定 18 个字段。
     external fun nativeProcessEpoch(

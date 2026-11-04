@@ -8,7 +8,8 @@ import java.util.TimeZone
 
 /**
  * 实时入口的本地产品路径选择，不下载产品，不解析实时 OBS。
- * 普通产品按文件修改时间选最新非空文件；不代表其内部时段一定覆盖观测，JNI 另检查覆盖。
+ * NAV 按产品日期选最新可用文件；NRT 轨道／钟差按同一起算时次成对选择。
+ * 文件名时段不等于实际记录覆盖，JNI 仍需检查实际观测覆盖及星历有效期。
  * VMF3 则按文件名中的 UTC 时刻选择包围首历元的两期；不是任选当天两份文件。
  */
 object LivePppProducts {
@@ -47,28 +48,56 @@ object LivePppProducts {
         return resolved
     }
 
+    /** 旧版本可能留下日期更近但损坏的 NAV，不能让它遮住本次成功回退下载的文件。 */
+    internal fun resolveNavFile(dir: File, utcMillis: Long): File {
+        val byName = dir.listFiles()?.filter { it.isFile && it.length() > 0L }.orEmpty().associateBy { it.name }
+        for (name in BroadcastNavPolicy.candidates(byName.keys, utcMillis)) {
+            val candidate = byName.getValue(name)
+            try {
+                // 先检查 gzip CRC，避免损坏的压缩副本覆盖原本完好的解压文件。
+                if (!FtpDownloader.reusableLocalFile(candidate)) continue
+                val resolved = unpack(candidate)
+                if (BroadcastNavPolicy.validRinex3(resolved, false)) return resolved
+            } catch (_: Exception) { /* 继续尝试下一份近期 NAV，不删除用户文件。 */ }
+        }
+        throw IllegalArgumentException("缺少近期有效的 RINEX3 NAV，请下载最新可用广播星历")
+    }
+
+    /** Live sessions use the latest RTS issue, never an old NRT file with a newer filesystem mtime. */
+    internal fun resolveBiasFile(dir: File, utcMillis: Long): File {
+        val files = dir.listFiles()?.filter { it.isFile && it.length() > 0L }.orEmpty().associateBy { it.name }
+        val name = RtsBiasPolicy.latest(files.keys, utcMillis)
+            ?: throw IllegalArgumentException("缺少 RTS BIA 产品，请下载最新 RTS 偏差文件")
+        val source = files.getValue(name)
+        require(FtpDownloader.reusableLocalFile(source)) { "RTS BIA 文件损坏：$name，请重新下载" }
+        return unpack(source)
+    }
+
     /** @return 固定 9 项路径，顺序与 LivePppNative.nativeInit/gnss_jni.cpp 一致。 */
     fun resolve(dir: File, clock: GnssClock): Array<String> {
         require(dir.isDirectory) { "产品目录不存在：${dir.absolutePath}" }
-        val nav = latest(dir, "RINEX NAV") {
-            it.startsWith("BRDC") && (it.endsWith("_MN.RNX") || it.endsWith("_MN.RNX.GZ"))
+        val utcMillis = epochUtcMillis(clock)
+        val files = dir.listFiles()?.filter { it.isFile && it.length() > 0L }.orEmpty()
+        val byName = files.associateBy { it.name }
+        val nav = resolveNavFile(dir, utcMillis)
+        val nrtNames = byName.keys.filter { NrtProductPolicy.parse(it) != null }
+        val nrtPair = NrtProductPolicy.pairs(nrtNames, utcMillis).firstOrNull()
+        require(nrtNames.isEmpty() || nrtPair != null) {
+            "缺少同一起算时次且覆盖当前时间的 NRT SP3/CLK，请刷新产品"
         }
-        val sp3 = latest(dir, "SP3") {
+        val sp3 = if (nrtPair != null) unpack(byName.getValue(nrtPair.orbit)) else latest(dir, "SP3") {
             it.endsWith(".SP3") || it.endsWith(".SP3.GZ")
         }
-        val clk = latest(dir, "CLK") {
+        val clk = if (nrtPair != null) unpack(byName.getValue(nrtPair.clock)) else latest(dir, "CLK") {
             it.endsWith(".CLK") || it.endsWith(".CLK.GZ")
         }
-        val bia = latest(dir, "BIA") {
-            it.endsWith(".BIA") || it.endsWith(".BIA.GZ")
-        }
+        val bia = resolveBiasFile(dir, utcMillis)
         val ionex = latest(dir, "IONEX") {
             it.endsWith(".INX") || it.endsWith(".INX.GZ")
         }
         val orog = latest(dir, "VMF3 orography") { it == "OROGRAPHY_ELL_5X5" }
         val atx = latest(dir, "ATX") { it == "IGS20.ATX" }
 
-        val utcMillis = epochUtcMillis(clock)
         val parser = SimpleDateFormat("yyyyMMddHH", Locale.US).apply {
             timeZone = TimeZone.getTimeZone("UTC")
             isLenient = false

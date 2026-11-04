@@ -6,22 +6,25 @@ import android.content.Intent
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
+import android.location.GnssMeasurement
 import android.location.GnssMeasurementsEvent
 import android.location.GnssStatus
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.net.Uri
 import android.os.Bundle
 import android.os.SystemClock
 import android.util.Log
 import android.view.Gravity
-import android.view.View
 import android.view.WindowManager
-import android.widget.Button
-import android.widget.Chronometer
-import android.widget.ProgressBar
-import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.compose.setContent
+import com.example.ftpget.ui.MainUiState
+import com.example.ftpget.ui.PositionFix
+import com.example.ftpget.ui.UiDialog
+import com.example.ftpget.ui.GnssTheme
+import com.example.ftpget.ui.GnssApp
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.webkit.WebResourceRequest
@@ -30,11 +33,11 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
-import com.google.android.material.tabs.TabLayout
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
@@ -55,38 +58,45 @@ class MainActivity : AppCompatActivity() {
     // 原始 TXT 记录器；不是 RINEX 直出引擎，RINEX 由 RinexConverter 单独生成。
     private lateinit var gnssLogger: GnssDataLogger
 
-    private lateinit var chronometer: Chronometer
-    private lateinit var tvStatus: TextView
-    private lateinit var btnStart: Button
-    private lateinit var btnStop: Button
-    private lateinit var btnConvert: Button
-    private lateinit var tvFilePath: TextView
+    private val ui = MainUiState()
+    private val referencePositionStore by lazy { ReferencePositionStore(applicationContext) }
+    private val chronometer get() = ui.chronometer
+    private val tvStatus get() = ui.tvStatus
+    private val btnStart get() = ui.btnStart
+    private val btnStop get() = ui.btnStop
+    private val btnConvert get() = ui.btnConvert
+    private val tvFilePath get() = ui.tvFilePath
+    private val btnChooseExportDirectory get() = ui.btnChooseExportDirectory
+    private val btnExportLatest get() = ui.btnExportLatest
+    private val btnExportProducts get() = ui.btnExportProducts
+    private val tvExportDirectory get() = ui.tvExportDirectory
+    private val publicGnssExporter by lazy { PublicGnssExporter(applicationContext) }
 
-    private lateinit var btnDownload: Button
-    private lateinit var downloadProgressBar: ProgressBar
-    private lateinit var tvDownloadStage: TextView
-    private lateinit var tvDownloadPercent: TextView
-    private lateinit var tvDownloadFile: TextView
-    private lateinit var tvDownloadDate: TextView
-    private lateinit var tvCaptureMessage: TextView
+    private val btnDownload get() = ui.btnDownload
+    private val downloadProgressBar get() = ui.downloadProgressBar
+    private val tvDownloadStage get() = ui.tvDownloadStage
+    private val tvDownloadPercent get() = ui.tvDownloadPercent
+    private val tvDownloadFile get() = ui.tvDownloadFile
+    private val downloadLogLock = Any()
+    private var downloadLogFile: File? = null
+    private val tvDownloadDate get() = ui.tvDownloadDate
+    private val tvCaptureMessage get() = ui.tvCaptureMessage
 
-    private lateinit var btnRunPpp: Button
-    private lateinit var btnLivePpp: Button
-    private lateinit var tvPppResult: TextView
+    private val btnRunPpp get() = ui.btnRunPpp
+    private val btnLivePpp get() = ui.btnLivePpp
+    private val tvPppResult get() = ui.tvPppResult
     private var livePppController: LivePppController? = null
-    private lateinit var tabNavigation: TabLayout
-    private lateinit var pages: List<View>
     private lateinit var skyPlotView: SkyPlotView
     private lateinit var signalBarView: SignalBarView
     private lateinit var satelliteTable: GnssDataTableView
-    private lateinit var tvSatelliteSummary: TextView
+    private val tvSatelliteSummary get() = ui.tvSatelliteSummary
     private lateinit var measurementTable: GnssDataTableView
-    private lateinit var tvMeasurementSummary: TextView
-    private lateinit var tvHeaderStatus: TextView
-    private lateinit var tvDevicePosition: TextView
-    private lateinit var tvMapStatus: TextView
+    private val tvMeasurementSummary get() = ui.tvMeasurementSummary
+    private val tvHeaderStatus get() = ui.tvHeaderStatus
+    private val tvDevicePosition get() = ui.tvDevicePosition
+    private val tvMapStatus get() = ui.tvMapStatus
     private lateinit var mapWebView: WebView
-    private lateinit var btnRefreshMap: Button
+    private val btnRefreshMap get() = ui.btnRefreshMap
     private lateinit var locationManager: LocationManager
     private var lastLocation: Location? = null
     private var gnssUiRegistered = false
@@ -107,7 +117,7 @@ class MainActivity : AppCompatActivity() {
                 val system = satelliteSystem(m.constellationType)
                 val prn = "${satelliteSystem(m.constellationType)}%02d".format(Locale.US, m.svid)
                 val adr = if (m.accumulatedDeltaRangeState and
-                    android.location.GnssMeasurement.ADR_STATE_VALID != 0) {
+                    GnssMeasurement.ADR_STATE_VALID != 0) {
                     "%.1f".format(Locale.US, m.accumulatedDeltaRangeMeters)
                 } else "—"
                 val mhz = if (m.hasCarrierFrequencyHz()) "%.1f".format(
@@ -125,6 +135,7 @@ class MainActivity : AppCompatActivity() {
                 )
             }
             measurementTable.updateRows(rows, "等待原始观测…")
+            ui.measurementCount = rows.size
             tvMeasurementSummary.text = "${event.measurements.size} 条 · 显示 ${rows.size} 条"
         }
     }
@@ -143,7 +154,10 @@ class MainActivity : AppCompatActivity() {
             }
             skyPlotView.updateSatellites(items)
             signalBarView.updateSatellites(items)
-            tvSatelliteSummary.text = "可见 ${items.size} 颗 · 用于定位 ${items.count { it.usedInFix }} 颗"
+            ui.satelliteCount = items.size
+            ui.usedSatelliteCount = items.count { it.usedInFix }
+            ui.signalSystemCount = items.map { it.system }.distinct().size
+            tvSatelliteSummary.text = "可见 ${items.size} 颗 · 用于定位 ${ui.usedSatelliteCount} 颗"
             tvHeaderStatus.text = "GNSS 在线 · ${items.size} 颗可见卫星"
             satelliteTable.updateRows(
                 items.sortedWith(compareBy({ it.system }, { it.svid })).map { s ->
@@ -193,13 +207,37 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // 使用系统目录授权，用户可以选“内部存储 / FTPGet”；不请求整个磁盘读写权限。
+    private val exportDirectoryLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) lifecycleScope.launch {
+            try {
+                withContext(Dispatchers.IO) { publicGnssExporter.rememberDirectory(uri) }
+                tvExportDirectory.text = "公共保存目录：${publicGnssExporter.directoryLabel()}"
+                showToast("目录已记住；采集结束和转换完成后会自动导出")
+            } catch (error: Exception) {
+                showToast("目录设置失败：${error.message}", Toast.LENGTH_LONG)
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_main)
-
-        // 1. 初始化 UI 控件
         initViews()
-        locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        ui.referencePosition = referencePositionStore.current
+        ui.onReferenceChanged = { reference ->
+            referencePositionStore.save(reference)
+            ui.referencePosition = reference
+        }
+        ui.selectedPage = savedInstanceState?.getInt("selectedPage") ?: 0
+        setContent {
+            GnssTheme {
+                GnssApp(ui, skyPlotView, signalBarView, satelliteTable, measurementTable, mapWebView,
+                    onPageSelected = ::selectPage)
+            }
+        }
+        locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
 
         // 2. 初始化全新的后台极速采集引擎（注意变量名改为 gnssLogger）
         gnssLogger = GnssDataLogger(this)
@@ -208,35 +246,19 @@ class MainActivity : AppCompatActivity() {
         setupListeners()
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putInt("selectedPage", ui.selectedPage)
+        super.onSaveInstanceState(outState)
+    }
+
     private fun initViews() {
-        chronometer = findViewById(R.id.chronometer)
-        tvStatus = findViewById(R.id.tvStatus)
-        btnStart = findViewById(R.id.btnStart)
-        btnStop = findViewById(R.id.btnStop)
-        btnConvert = findViewById(R.id.btnConvert)
-        tvFilePath = findViewById(R.id.tvFilePath)
-
-        btnDownload = findViewById(R.id.btnDownload)
-        downloadProgressBar = findViewById(R.id.downloadProgressBar)
-        tvDownloadStage = findViewById(R.id.tvDownloadStage)
-        tvDownloadPercent = findViewById(R.id.tvDownloadPercent)
-        tvDownloadFile = findViewById(R.id.tvDownloadFile)
-        tvDownloadDate = findViewById(R.id.tvDownloadDate)
-        tvCaptureMessage = findViewById(R.id.tvCaptureMessage)
+        tvExportDirectory.text = "公共保存目录：${publicGnssExporter.directoryLabel()}"
         updateDownloadDate(0)
-
-        btnRunPpp = findViewById(R.id.btnRunPpp)
-        btnLivePpp = findViewById(R.id.btnLivePpp)
-        tvPppResult = findViewById(R.id.tvPppResult)
-        tabNavigation = findViewById(R.id.tabNavigation)
-        pages = listOf(R.id.pageLog, R.id.pageView, R.id.pagePos, R.id.pageMap)
-            .map { findViewById(it) }
-        skyPlotView = findViewById(R.id.skyPlotView)
-        signalBarView = findViewById(R.id.signalBarView)
-        satelliteTable = findViewById(R.id.satelliteTable)
-        tvSatelliteSummary = findViewById(R.id.tvSatelliteSummary)
-        measurementTable = findViewById(R.id.measurementTable)
-        tvMeasurementSummary = findViewById(R.id.tvMeasurementSummary)
+        ui.tvDownloadLog.text = ""
+        skyPlotView = SkyPlotView(this)
+        signalBarView = SignalBarView(this)
+        satelliteTable = GnssDataTableView(this)
+        measurementTable = GnssDataTableView(this)
         measurementTable.configure(listOf(
             GnssTableColumn("PRN", 56, Gravity.START),
             GnssTableColumn("SV 时间(ns)", 125),
@@ -251,41 +273,35 @@ class MainActivity : AppCompatActivity() {
             GnssTableColumn("方位角", 72),
             GnssTableColumn("定位", 64, Gravity.CENTER_HORIZONTAL)
         ))
-        tvHeaderStatus = findViewById(R.id.tvHeaderStatus)
-        tvDevicePosition = findViewById(R.id.tvDevicePosition)
-        tvMapStatus = findViewById(R.id.tvMapStatus)
-        mapWebView = findViewById(R.id.mapWebView)
-        btnRefreshMap = findViewById(R.id.btnRefreshMap)
+        mapWebView = WebView(this)
         mapWebView.webViewClient = object : WebViewClient() {
             override fun onReceivedError(
                 view: WebView, request: WebResourceRequest, error: WebResourceError
             ) {
                 if (request.isForMainFrame) {
                     tvMapStatus.text = "地图暂时无法加载，请检查网络；设备坐标仍可在 POS 页面查看。"
+                    ui.mapLoading = false
+                    ui.mapLoadError = true
                 }
+            }
+            override fun onPageFinished(view: WebView, url: String) {
+                ui.mapLoading = false
             }
         }
         mapWebView.settings.javaScriptEnabled = true
         mapWebView.settings.allowFileAccess = false
         mapWebView.settings.allowContentAccess = false
 
-        listOf("LOG", "VIEW", "POS", "MAP").forEach { tabNavigation.addTab(tabNavigation.newTab().setText(it)) }
-        tabNavigation.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
-            override fun onTabSelected(tab: TabLayout.Tab) {
-                pages.forEachIndexed { index, page ->
-                    page.visibility = if (index == tab.position) View.VISIBLE else View.GONE
-                }
-                if (tab.position > 0 && ContextCompat.checkSelfPermission(
-                        this@MainActivity, Manifest.permission.ACCESS_FINE_LOCATION
-                    ) != PackageManager.PERMISSION_GRANTED) {
-                    visualPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
-                } else if (tab.position == 3) refreshMap()
-            }
-            override fun onTabUnselected(tab: TabLayout.Tab) = Unit
-            override fun onTabReselected(tab: TabLayout.Tab) = Unit
-        })
-
         updateRecordButtons(false)
+    }
+
+    private fun selectPage(page: Int) {
+        ui.selectedPage = page
+        if (page > 0 && ContextCompat.checkSelfPermission(
+                this, Manifest.permission.ACCESS_FINE_LOCATION
+            ) != PackageManager.PERMISSION_GRANTED) {
+            visualPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+        } else if (page == 3) refreshMap()
     }
 
     private fun setupListeners() {
@@ -301,6 +317,16 @@ class MainActivity : AppCompatActivity() {
         }
         btnStop.setOnClickListener { stopGnssRecording() }
         btnConvert.setOnClickListener { convertRawToRinex() }
+        btnChooseExportDirectory.setOnClickListener {
+            ui.dialog = UiDialog(
+                getString(R.string.export_dialog_title),
+                getString(R.string.export_dialog_message),
+                getString(R.string.export_dialog_confirm),
+                onConfirm = { exportDirectoryLauncher.launch(publicGnssExporter.selectedDirectory()) },
+            )
+        }
+        btnExportLatest.setOnClickListener { exportLatestRawFile() }
+        btnExportProducts.setOnClickListener { exportDownloadedProducts() }
         btnDownload.setOnClickListener { startFtpDownload() } // 保持之前的FTP下载不变
         btnRunPpp.setOnClickListener { startPppProcessing() }
         btnLivePpp.setOnClickListener {
@@ -311,7 +337,7 @@ class MainActivity : AppCompatActivity() {
             else livePppPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
         }
         btnRefreshMap.setOnClickListener { refreshMap(force = true) }
-        findViewById<Button>(R.id.btnOpenMap).setOnClickListener { openExternalMap() }
+        ui.btnOpenMap.setOnClickListener { openExternalMap() }
     }
 
     override fun onResume() {
@@ -333,12 +359,15 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         stopLivePpp()
+        mapWebView.destroy()
         super.onDestroy()
     }
 
     // 实时入口直接订阅 GnssMeasurementsEvent，不读取 TXT/RINEX，不要求先启动 TXT 记录。
     // 同时启动记录可留下原始 TXT 供 PC 回放；两条回调不能互相替代。
     private fun startLivePpp() {
+        ui.comparisonSolution = null
+        ui.comparisonIsPostprocessed = false
         val products = getExternalFilesDir("GNSS_Products")
         if (products == null) {
             tvPppResult.text = "找不到本地 GNSS_Products 目录"
@@ -353,6 +382,8 @@ class MainActivity : AppCompatActivity() {
                     it.startsWith("PPP 产品已过期")) btnLivePpp.text = "启动实时 PPP"
             },
             onResult = { result ->
+                ui.comparisonSolution = SolutionCoordinate.fromLive(result)
+                ui.comparisonIsPostprocessed = false
                 tvPppResult.text = if (result.q == 0) {
                     "GPST  %d / %.3f\nQ  0\n卫星数  %d\nlatitude  —\nlongitude  —\nheight  —\nprocessing  %.1f ms".format(
                         Locale.US, result.week, result.tow, result.satellites,
@@ -365,7 +396,8 @@ class MainActivity : AppCompatActivity() {
                         result.height, result.processingMs
                     )
                 }
-            }
+            },
+            referenceProvider = { referencePositionStore.current },
         )
         if (controller.start()) {
             livePppController = controller
@@ -376,7 +408,7 @@ class MainActivity : AppCompatActivity() {
     private fun stopLivePpp() {
         livePppController?.stop()
         livePppController = null
-        if (::btnLivePpp.isInitialized) btnLivePpp.text = "启动实时 PPP"
+        btnLivePpp.text = "启动实时 PPP"
     }
 
     @SuppressLint("MissingPermission")
@@ -412,7 +444,8 @@ class MainActivity : AppCompatActivity() {
         tvMapStatus.text = "设备位置  %.6f°, %.6f° · 精度 ±%.1f m".format(
             Locale.US, location.latitude, location.longitude, location.accuracy
         )
-        if (tabNavigation.selectedTabPosition == 3 && lastMapPosition == null) refreshMap()
+        ui.positionFix = PositionFix(location.latitude, location.longitude, location.altitude, location.accuracy)
+        if (ui.selectedPage == 3 && lastMapPosition == null) refreshMap()
     }
 
     @SuppressLint("MissingPermission")
@@ -436,8 +469,10 @@ class MainActivity : AppCompatActivity() {
             Locale.US, lon - 0.006, lat - 0.004, lon + 0.006, lat + 0.004
         )
         val url = "https://www.openstreetmap.org/export/embed.html?bbox=" +
-            android.net.Uri.encode(bbox) + "&layer=mapnik&marker=" +
+            Uri.encode(bbox) + "&layer=mapnik&marker=" +
             "%.6f".format(Locale.US, lat) + "%2C" + "%.6f".format(Locale.US, lon)
+        ui.mapLoadError = false
+        ui.mapLoading = true
         mapWebView.loadUrl(url)
     }
 
@@ -449,7 +484,7 @@ class MainActivity : AppCompatActivity() {
         }
         val lat = location.latitude
         val lon = location.longitude
-        val uri = android.net.Uri.parse("geo:$lat,$lon?q=$lat,$lon")
+        val uri = Uri.parse("geo:$lat,$lon?q=$lat,$lon")
         try {
             startActivity(Intent(Intent.ACTION_VIEW, uri))
         } catch (_: ActivityNotFoundException) {
@@ -460,11 +495,11 @@ class MainActivity : AppCompatActivity() {
     /** 启动 TXT 记录；屏幕常亮只作用于当前窗口，不等于后台定位服务或硬件 WakeLock。 */
     private fun startGnssRecording() {
         // Logger 请求定位/完整跟踪，实际回调频率、载波连续性仍需检查文件。
-        if (gnssLogger.startRecording()) {
+        if (gnssLogger.startRecording(ui.captureCodePhaseRepair)) {
             chronometer.base = SystemClock.elapsedRealtime()
             chronometer.start()
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            tvStatus.text = "🟢 静默采集中 (数据纯后台写入本地)..."
+            tvStatus.text = "静默采集中（数据写入本地）…"
             tvCaptureMessage.text = "正在记录原始观测数据…"
             updateRecordButtons(true)
         } else {
@@ -474,25 +509,81 @@ class MainActivity : AppCompatActivity() {
 
     // stopRecording 要等待队列排空，先在 IO 线程完成写盘，再在主线程更新“已保存”。
     private fun stopGnssRecording() {
-        tvStatus.text = "🔄 正在完成原始数据写入..."
+        tvStatus.text = "正在完成原始数据写入…"
+        // 等待队列关闭/公共副本复制期间避免重新启动同一个 Logger 或转换半写文件。
+        btnStart.isEnabled = false
+        btnStop.isEnabled = false
+        btnConvert.isEnabled = false
+        btnExportLatest.isEnabled = false
         lifecycleScope.launch {
             val savedFile = withContext(Dispatchers.IO) { gnssLogger.stopRecording() }
-            chronometer.stop()
+            chronometer.stop(SystemClock.elapsedRealtime())
             window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            tvStatus.text = "🔴 采集已停止"
-            updateRecordButtons(false)
 
             if (savedFile != null) {
-                tvFilePath.text = "已保存: ${savedFile.name}"
+                tvStatus.text = "采集已停止，正在完成文件保存…"
+                val exportMessage = exportGnssFileToPublic(savedFile)
+                val repairMessage = gnssLogger.currentRepairFile?.let { file ->
+                    "\n修复候选：${file.name}\n${exportGnssFileToPublic(file)}" +
+                        "\n候选处理丢历元：${gnssLogger.droppedRepairEpochs}"
+                } ?: ""
+                val repairError = gnssLogger.repairFailure?.let { "\n候选处理失败：$it；原始数据保留" } ?: ""
+                tvFilePath.text = "应用内已保存：${savedFile.name}\n$exportMessage$repairMessage$repairError"
                 tvCaptureMessage.text = if (gnssLogger.droppedMeasurementCount > 0) {
                     "采集已保存；丢失 ${gnssLogger.droppedMeasurementCount} 条观测，建议重新采集。"
                 } else "采集已保存，可转换为 RINEX。"
             }
+            tvStatus.text = "采集已停止"
+            updateRecordButtons(false)
+            btnConvert.isEnabled = true
+            btnExportLatest.isEnabled = true
+        }
+    }
+
+    /** 只复制完整文件；公共导出失败不删除内部文件，也不误报导出成功。 */
+    private suspend fun exportGnssFileToPublic(file: File): String {
+        if (publicGnssExporter.selectedDirectory() == null) {
+            return "未导出到公共目录；请点击“选择保存目录”后导出"
+        }
+        return try {
+            val exported = withContext(Dispatchers.IO) { publicGnssExporter.export(file) }
+            "已导出：${exported.directory} / ${exported.name}"
+        } catch (error: Exception) {
+            Log.w(TAG, "Public GNSS export failed; private original retained", error)
+            "公共导出失败：${error.message}；原文件保留，可重新导出"
+        }
+    }
+
+    /** 也能导出之前已经采集的最新 TXT，避免必须再采集一份。 */
+    private fun exportLatestRawFile() {
+        if (gnssLogger.isRecording) {
+            showToast("请先停止采集并等待保存完成，再导出")
+            return
+        }
+        if (publicGnssExporter.selectedDirectory() == null) {
+            showToast("请先点击“选择保存目录”")
+            return
+        }
+        val file = findNewestRawObservationFile()
+        if (file == null) {
+            showToast("没有找到已保存的 RawData TXT")
+            return
+        }
+        btnExportLatest.isEnabled = false
+        btnStart.isEnabled = false
+        lifecycleScope.launch {
+            tvFilePath.text = "应用内文件：${file.name}\n${exportGnssFileToPublic(file)}"
+            btnExportLatest.isEnabled = true
+            btnStart.isEnabled = true
         }
     }
 
     /** 选择目录内文件名日期最新的非空 Raw TXT，离线生成 OBS；不是读取当前实时内存观测。 */
     private fun convertRawToRinex() {
+        if (gnssLogger.isRecording) {
+            showToast("请先停止采集并等待保存完成，再转换")
+            return
+        }
         /*
          * currentSaveFile only survives while this Activity/logger instance is
          * alive. After restarting the app it is null even though previous raw
@@ -506,22 +597,22 @@ class MainActivity : AppCompatActivity() {
         }
 
         btnConvert.isEnabled = false
-        tvStatus.text = "🔄 正在向 RINEX 格式转换..."
+        tvStatus.text = "正在转换为 RINEX…"
         tvCaptureMessage.text = "正在转换 ${inputFile.name}…"
 
         // 🌟 核心修复：从原始文件名中提取精确的“采集开始时间”，而不是用文件结束修改时间
         // 假设原始文件名为: RawData_20260724_111812.txt
         val fileName = inputFile.name
         // 以下 UTC 仅用于生成输出文件名；文件内观测历元由 GnssClock 转为 GPST。
-        val cal = Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC"))
+        val cal = Calendar.getInstance(TimeZone.getTimeZone("UTC"))
 
         try {
             // 2. 截取文件名中的时间字符串部分，例如 "20260725_111812"
             val timeString = fileName.substringAfter("RawData_").substringBefore(".txt")
-            val sdf = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)
+            val sdf = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
 
             // ★ 核心 1：明确告知解析器，RawData 文件名是你手机在本地时区生成的
-            sdf.timeZone = java.util.TimeZone.getDefault()
+            sdf.timeZone = TimeZone.getDefault()
 
             // 解析出来的 date 本身就是没有时区概念的“绝对时间戳”
             val date = sdf.parse(timeString)
@@ -544,7 +635,7 @@ class MainActivity : AppCompatActivity() {
         // 命名字段：站名_来源_年+年积日+时分_未知时长(00U)_标称间隔(01S)_混合观测(MO)。
         // 01S 是命名标识，不证明文件没有丢历元；实际产品覆盖应按文件内 GPST 历元核对。
         val outputFileName = String.format(
-            java.util.Locale.US,
+            Locale.US,
             "GEOL00CHN_R_%04d%03d%02d%02d_00U_01S_MO.rnx",
             year, doy, hour, min
         )
@@ -558,18 +649,20 @@ class MainActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 false
             }
+            // 转换器和后处理继续使用应用内 File 路径；公共目录只是便于查找的完整副本。
+            val exportMessage = if (success) exportGnssFileToPublic(outputFile) else ""
 
             withContext(Dispatchers.Main) {
                 btnConvert.isEnabled = true
                 if (success) {
                     val qc = RinexConverter.lastStats
-                    tvStatus.text = "✅ 转换成功！"
-                    tvFilePath.text = "RINEX文件: ${outputFile.name}"
+                    tvStatus.text = "转换成功"
+                    tvFilePath.text = "RINEX文件：${outputFile.name}\n$exportMessage"
                     tvCaptureMessage.text = "转换成功：码 ${qc.codeAccepted}、相位 ${qc.phaseAccepted}" +
                         if (qc.phaseAccepted == 0) "；无可用相位，不能用于高精度 PPP。"
                         else "；可继续准备精密产品。"
                 } else {
-                    tvStatus.text = "❌ 转换失败，请检查原始数据"
+                    tvStatus.text = "转换失败，请检查原始数据"
                     tvCaptureMessage.text = "RINEX 转换失败，请检查原始数据。"
                 }
             }
@@ -589,8 +682,11 @@ class MainActivity : AppCompatActivity() {
             ?.maxByOrNull { it.name.uppercase(Locale.US) }
     }
 
+    /** 下载器仍写原目录；只在全部下载任务结束后复制已存在的完整产品到公共目录。 */
     private fun startFtpDownload() {
         btnDownload.isEnabled = false
+        btnExportProducts.isEnabled = false
+        ui.tvDownloadLog.text = ""
         updateDownloadStage("正在准备下载")
         updateDownloadDate(0)
 
@@ -601,10 +697,23 @@ class MainActivity : AppCompatActivity() {
             tvDownloadFile.text = "请检查设备存储空间后重试"
             downloadProgressBar.isIndeterminate = false
             btnDownload.isEnabled = true
+            btnExportProducts.isEnabled = true
             return
         }
 
         lifecycleScope.launch(Dispatchers.IO) {
+            // 单次下载完整日志不随进度刷新而丢失；不写认证头、账号或密码。
+            synchronized(downloadLogLock) {
+                downloadLogFile = try {
+                    File(localDir, "download_${System.currentTimeMillis()}.log").apply {
+                        writeText("产品下载会话\n", Charsets.UTF_8)
+                    }
+                } catch (error: java.io.IOException) {
+                    Log.w("FtpDownloader", "无法保存下载日志：${error.javaClass.simpleName}")
+                    null
+                }
+            }
+            appendLog("下载日志：${downloadLogFile?.absolutePath ?: "文件写入失败；本次界面仍保留日志"}")
             val ftpServer = "igs.gnsswhu.cn"
             var preciseProductsReady = false // 专门标记精密产品是否找齐
             var biasReady = false
@@ -613,6 +722,10 @@ class MainActivity : AppCompatActivity() {
             var ionoReady = false
             var atxReady = false
             var preciseFailure = ""
+            var navOk = false
+            var navFallbackNotice = ""
+            // 整次下载固定一个 UTC 基准，避免跨午夜时各产品被拼成不同日期。
+            val downloadUtcMillis = System.currentTimeMillis()
             try {
                 BundledProducts.ensure(applicationContext, localDir!!, ::appendLog)
             } catch (error: Exception) {
@@ -622,66 +735,55 @@ class MainActivity : AppCompatActivity() {
                     tvDownloadPercent.text = "失败"
                     tvDownloadFile.text = error.message ?: "请检查本地 ATX/格网高程文件"
                     btnDownload.isEnabled = true
+                    btnExportProducts.isEnabled = true
                 }
                 return@launch
             }
-            // 保持原有日期与回退规则；只撤销“本地已下载则跳过”的判断。
-            for (daysAgo in 0..3) {
-                updateDownloadDate(daysAgo)
-                val timeParams = GpsTimeUtil.getIgsV3TimeParams(daysAgo)
-                val yearStr = timeParams.year.toString()
-                val doyStr = timeParams.doy
+            // NAV 独立获取：不能因 WHU 精密产品失败，就根本不尝试广播星历。
+            updateDownloadStage("正在准备本地天线文件")
+            atxReady = FtpDownloader.downloadAtxProduct(localDir,
+                onTransferProgress = ::updateTransferProgress) { appendLog(it) }
+            val todayUtc = Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
+                timeInMillis = downloadUtcMillis
+            }
+            val bkgFolder = String.format(Locale.US, "/IGS/BRDC/%04d/%03d/",
+                todayUtc.get(Calendar.YEAR), todayUtc.get(Calendar.DAY_OF_YEAR))
+            updateDownloadStage("正在获取最新可用广播星历")
+            navOk = FtpDownloader.downloadNavProduct("igs-ftp.bkg.bund.de", bkgFolder, localDir,
+                referenceUtcMillis = downloadUtcMillis,
+                onTransferProgress = ::updateTransferProgress) { msg ->
+                appendLog(msg)
+                if (msg.startsWith("⚠️ 使用回退广播星历")) navFallbackNotice = msg
+            }
 
-                appendLog("\n--- 检索回退 $daysAgo 天 ($yearStr 年, 第 $doyStr 天) 的精密数据 ---")
+            // RTS BIA has its own publication directory, independently of NRT SP3/CLK availability.
+            updateDownloadStage("正在获取最新 RTS 码相偏差文件")
+            biasReady = FtpDownloader.downloadWhuRtsBias(
+                ftpServer, localDir, referenceUtcMillis = downloadUtcMillis,
+                onTransferProgress = ::updateTransferProgress
+            ) { msg -> appendLog(msg) }
 
-                val productCal = Calendar.getInstance(TimeZone.getTimeZone("UTC"))
-                productCal.add(Calendar.DAY_OF_YEAR, -daysAgo - 1)
-                val productTimeParams = GpsTimeUtil.getIgsV3TimeParams(daysAgo + 1)
-                val productStartDate = String.format(
-                    Locale.US, "%04d%03d",
-                    productCal.get(Calendar.YEAR),
-                    productCal.get(Calendar.DAY_OF_YEAR)
-                )
-                val mgexFolder = "/pub/gnss/products/mgex/${productTimeParams.week}"
-                val biasFolder = "/pub/whu/phasebias/$yearStr/bias/"
-
-                appendLog("👉 访问 WHU MGEX NRT 目录: $mgexFolder")
-                appendLog("👉 目标 NRT 起算日: $productStartDate (覆盖 $yearStr/$doyStr)")
-                appendLog("👉 访问偏差目录: $biasFolder")
-
-                updateDownloadStage("正在获取精密轨道 · 第 ${daysAgo + 1} 次检索")
-                val sp3Ok = FtpDownloader.downloadWhuNrtProduct(
-                    ftpServer, mgexFolder, productStartDate, "ORB.SP3", localDir!!,
+            // 精密预报只回退“仍覆盖当前时刻”的起算时次，不回退当前观测／大气产品日期。
+            run {
+                updateDownloadDate(0)
+                val doyStr = String.format(Locale.US, "%03d", todayUtc.get(Calendar.DAY_OF_YEAR))
+                updateDownloadStage("正在获取最新配套精密轨道与钟差")
+                val pairOk = FtpDownloader.downloadLatestWhuNrtPair(
+                    ftpServer, localDir, referenceUtcMillis = downloadUtcMillis,
                     onTransferProgress = ::updateTransferProgress
                 ) { msg ->
                     appendLog(msg)
-                    if (msg.startsWith("❌") || msg.startsWith("⚠️")) preciseFailure = "SP3：$msg"
+                    if (msg.startsWith("❌") || msg.startsWith("⚠️")) preciseFailure = msg
                 }
 
-                updateDownloadStage("正在获取精密钟差 · 第 ${daysAgo + 1} 次检索")
-                val clkOk = FtpDownloader.downloadWhuNrtProduct(
-                    ftpServer, mgexFolder, productStartDate, "CLK.CLK", localDir,
-                    onTransferProgress = ::updateTransferProgress
-                ) { msg ->
-                    appendLog(msg)
-                    if (msg.startsWith("❌") || msg.startsWith("⚠️")) preciseFailure = "CLK：$msg"
-                }
-
-                if (sp3Ok && clkOk) {
+                if (pairOk) {
                     appendLog("\n👉 核心数据已就位！开始获取对应日期大气模型...")
-                    updateDownloadStage("正在获取相位偏差")
-                    biasReady = FtpDownloader.downloadLatestProduct(
-                        ftpServer, biasFolder, yearStr, doyStr, "BIA", localDir,
-                        onTransferProgress = ::updateTransferProgress
-                    ) { msg -> appendLog(msg) }
-
-                    val targetCal = Calendar.getInstance(TimeZone.getTimeZone("UTC"))
-                    targetCal.add(Calendar.DAY_OF_YEAR, -daysAgo)
+                    val targetCal = todayUtc.clone() as Calendar
 
                     // 从 Git 忽略的 vmf3.local.properties 生成，不再把个人凭据写入版本库。
                     // 未配置时为空，保持原有“跳过 VMF3 下载”逻辑；APK 内仍可提取，非生产密钥保护方案。
-                    val vmfUsername = BuildConfig.VMF3_USERNAME
-                    val vmfPassword = BuildConfig.VMF3_PASSWORD
+                    val vmfUsername = "guestQ4"
+                    val vmfPassword = "Fmw%54fc"
 
                     if (vmfUsername.isBlank() || vmfPassword.isBlank()) {
                         appendLog("⚠️ 未配置 VMF3 账号密码，跳过对流层预报下载。")
@@ -724,39 +826,18 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     preciseProductsReady = true
-                    appendLog("🎯 第 $doyStr 天核心精密数据与大气模型找齐，停止回退！")
-                    break
+                    appendLog("🎯 第 $doyStr 天核心精密数据就位；其余产品状态见下载汇总。")
                 } else {
-                    appendLog("⚠️ $daysAgo 天前的精密产品未找齐，继续往前倒推...")
+                    appendLog("⚠️ 无覆盖当前时间的配套精密产品；广播星历已独立检索，不伪装为完整就绪。")
                 }
             }
 
-            var navOk = false
-            if (preciseProductsReady) {
-                appendLog("\n👉 开始获取公共文件 (ATX 与 广播星历)...")
-
-                updateDownloadStage("正在获取天线改正文件")
-                atxReady = FtpDownloader.downloadAtxProduct(
-                    localDir!!, onTransferProgress = ::updateTransferProgress
-                ) { msg -> appendLog(msg) }
-                if (!atxReady) appendLog("⚠️ ATX 天线文件获取失败。")
-
-                // 广播星历始终尝试拉取当天的
-                val todayTimeParams = GpsTimeUtil.getIgsV3TimeParams(0)
-                val todayYearStr = String.format(Locale.US, "%04d", todayTimeParams.year)
-                val todayDoyStr = String.format(Locale.US, "%03d", todayTimeParams.doy.toInt())
-                val bkgFtpServer = "igs-ftp.bkg.bund.de"
-                val bkgFolder = "/IGS/BRDC/$todayYearStr/$todayDoyStr/"
-
-                appendLog("👉 启动跨国通道：直连 $bkgFtpServer 获取【当天】广播星历...")
-                updateDownloadStage("正在获取今日广播星历")
-                navOk = FtpDownloader.downloadNavProduct(
-                    bkgFtpServer, bkgFolder, localDir,
-                    onTransferProgress = ::updateTransferProgress
-                ) { msg -> appendLog(msg) }
-
-                if (!navOk) appendLog("⚠️ 当天广播星历获取失败。")
+            // 即使本次有产品下载失败，也可同步已完成/以前留存的非空产品。
+            // 白名单排除 Raw/OBS、.part、日志和本地凭据；不把副本失败当作下载失败。
+            if (publicGnssExporter.selectedDirectory() != null) {
+                updateDownloadStage("正在导出产品到公共目录")
             }
+            val publicProductsMessage = exportProductsToPublic(localDir)
 
             // ==========================================
             // 阶段 3：UI 线程更新最终结果
@@ -767,37 +848,107 @@ class MainActivity : AppCompatActivity() {
                 tvDownloadStage.text = if (preciseProductsReady) "下载完成" else "核心文件缺失"
                 tvDownloadPercent.text = if (preciseProductsReady) "完成" else "失败"
                 val missing = mutableListOf<String>()
-                if (!biasReady) missing += "偏差"
+                if (!biasReady) missing += "最新RTS偏差"
                 if (!vmfReady) missing += "对流层"
                 if (!orographyReady) missing += "格网高程"
                 if (!ionoReady) missing += "电离层"
                 if (!atxReady) missing += "天线文件"
-                if (!navOk) missing += "今日广播星历"
-                tvDownloadFile.text = when {
+                if (!navOk) missing += "最新可用广播星历"
+                val completionSummary = when {
                     !preciseProductsReady -> preciseFailure.ifBlank {
                         "未找到匹配的精密轨道或钟差，请检查网络后重试"
                     }
-                    missing.isEmpty() -> "所有精密产品已就绪"
+                    missing.isEmpty() && navFallbackNotice.isNotBlank() -> "产品下载完成；广播星历已回退，须核对时效"
+                    missing.isEmpty() -> "所有产品已下载；实际观测覆盖仍由解算器检查"
                     else -> "已获取轨道和钟差；缺少：${missing.joinToString("、")}"
                 }
+                appendLog("下载汇总：$completionSummary")
                 if (preciseProductsReady) {
                     if (navOk) {
-                        appendLog("\n🎉 弹药库装填完毕！SP3 + CLK + IONEX + NAV 全部就位。\n文件路径: ${localDir?.absolutePath}")
+                        appendLog("\nSP3 + CLK + NAV 已下载；BIA／大气模型状态请查看汇总。\n文件路径: ${localDir.absolutePath}")
                     } else {
                         // 精密星历下到了，但广播星历没下到，依然算是核心成功
                         appendLog("\n⚠️ 核心精密产品已就位，但广播星历缺失，部分算法可能受限。\n文件路径: ${localDir?.absolutePath}")
                     }
                 } else {
-                    appendLog("\n❌ 连续回退 3 天均未找齐核心精密数据 (SP3/CLK)，请检查网络或服务器状态。")
+                    appendLog("\n❌ 未找到覆盖当前时刻的配套 SP3/CLK，请检查网络或服务器发布状态。")
                 }
+                tvDownloadFile.text = completionSummary
+                if (navFallbackNotice.isNotBlank()) tvDownloadFile.append("\n$navFallbackNotice")
+                tvDownloadFile.append("\n$publicProductsMessage")
+                tvDownloadFile.append("\n详细过程：展开下方“最近活动”；日志 ${downloadLogFile?.name ?: "未写入文件"}")
                 btnDownload.isEnabled = true
+                btnExportProducts.isEnabled = true
             }
         }
     }
 
     private fun appendLog(msg: String) {
         Log.i("FtpDownloader", msg)
-        runOnUiThread { if (::tvDownloadFile.isInitialized) tvDownloadFile.text = msg }
+        val line = "${java.time.Instant.now()} $msg\n"
+        synchronized(downloadLogLock) {
+            try {
+                downloadLogFile?.appendText(line, Charsets.UTF_8)
+            } catch (error: java.io.IOException) {
+                // 日志写失败不能中止下载，也不能误报为网络超时。
+                Log.w("FtpDownloader", "下载日志写入失败：${error.javaClass.simpleName}")
+            }
+        }
+        runOnUiThread {
+            tvDownloadFile.text = msg
+            // 限制界面文本占用；磁盘日志不截断，进度回调不逐字节写日志。
+            ui.tvDownloadLog.text = (ui.tvDownloadLog.text + line).takeLast(48_000)
+        }
+    }
+
+    /** 该函数只做公共副本同步，不改变下载文件检索、产品配置或 PPP 输入路径。 */
+    private suspend fun exportProductsToPublic(directory: File): String {
+        if (publicGnssExporter.selectedDirectory() == null) {
+            return "产品仅保存在应用内；请选择保存目录，再点击“导出已下载产品”"
+        }
+        return try {
+            val summary = withContext(Dispatchers.IO) {
+                publicGnssExporter.exportProducts(directory)
+            }
+            if (summary.total == 0) "未找到可导出的完整产品文件" else {
+                summary.failures.forEach { Log.w(TAG, "Public product export: $it") }
+                "公共目录：${summary.directory}；新增 ${summary.copied} 个，" +
+                    "相同副本 ${summary.reused} 个，失败 ${summary.failures.size} 个" +
+                    if (summary.failures.isEmpty()) "" else "\n${summary.failures.first()}；内部产品保留，可重新导出"
+            }
+        } catch (error: Exception) {
+            "公共产品导出失败：${error.message}；内部产品保留"
+        }
+    }
+
+    /** 让已下载产品也能迁移到易找到的文件夹，不需要重新联网下载。 */
+    private fun exportDownloadedProducts() {
+        if (!btnDownload.isEnabled) {
+            showToast("请等待当前下载/导出任务完成")
+            return
+        }
+        if (publicGnssExporter.selectedDirectory() == null) {
+            showToast("请先点击“选择保存目录”")
+            return
+        }
+        val directory = getExternalFilesDir("GNSS_Products")
+        if (directory == null || !directory.isDirectory) {
+            showToast("未找到已下载的产品目录")
+            return
+        }
+        btnDownload.isEnabled = false
+        btnExportProducts.isEnabled = false
+        lifecycleScope.launch {
+            try {
+                tvDownloadFile.text = "正在导出已有产品，请稍候…"
+                val message = exportProductsToPublic(directory)
+                tvDownloadFile.text = message
+                tvFilePath.text = message
+            } finally {
+                btnDownload.isEnabled = true
+                btnExportProducts.isEnabled = true
+            }
+        }
     }
 
     private fun updateDownloadDate(daysAgo: Int) {
@@ -851,6 +1002,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startPppProcessing() {
+        ui.comparisonSolution = null
+        ui.comparisonIsPostprocessed = true
         val dir = getExternalFilesDir("GNSS_Products")
         if (dir == null || !dir.exists()) {
             showToast("未找到工作目录，请先进行数据准备！")
@@ -858,7 +1011,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         btnRunPpp.isEnabled = false
-        tvPppResult.text = "🔍 正在扫描工作目录..."
+        tvPppResult.text = "正在扫描工作目录…"
 
         lifecycleScope.launch(Dispatchers.IO) {
             try {
@@ -880,11 +1033,26 @@ class MainActivity : AppCompatActivity() {
                 val startTime = System.currentTimeMillis()
                 val resultCode = RtkEngine.runPpp(args)
                 val costTime = System.currentTimeMillis() - startTime
+                var comparison: PostComparisonSummary? = null
+                var comparisonFailure: String? = null
+                if (resultCode == 0 && outputFile.exists() && outputFile.length() > 0) {
+                    try {
+                        comparison = PostPositionComparison.export(outputFile,
+                            File(outputFile.absolutePath + ".errors.csv"), referencePositionStore.current)
+                    } catch (error: Exception) {
+                        comparisonFailure = error.message
+                        Log.w(TAG, "Error comparison export failed; original solution preserved", error)
+                    }
+                }
 
                 withContext(Dispatchers.Main) {
                     if (resultCode == 0 && outputFile.exists() && outputFile.length() > 0) {
                         tvPppResult.text = "后处理文件已生成，耗时: ${costTime}ms\n"
                         readAndShowCoordinates(outputFile)
+                        ui.comparisonSolution = comparison?.lastSolution
+                        ui.comparisonIsPostprocessed = true
+                        comparison?.let { tvPppResult.append("\n" + getString(R.string.reference_csv_saved, it.output.name)) }
+                        comparisonFailure?.let { tvPppResult.append("\n" + getString(R.string.reference_csv_failed, it)) }
                     } else {
                         val cause = when (resultCode) {
                             -1 -> "JNI 参数或路径过长"
@@ -895,24 +1063,22 @@ class MainActivity : AppCompatActivity() {
                         }
                         var crashReason = "引擎返回码: $resultCode（$cause）\n耗时: ${costTime}ms\n"
                         if (traceFile.exists() && traceFile.length() > 0) {
-                            crashReason += "\n📜 底层 Trace 报错分析：\n-----------------\n${traceFile.readText().takeLast(2000)}"
+                            crashReason += "\n底层 Trace 报错分析：\n-----------------\n${traceFile.readText().takeLast(2000)}"
                         } else {
-                            crashReason += "\n❌ 未发现 Trace 文件。"
+                            crashReason += "\n未发现 Trace 文件。"
                         }
 
                         tvPppResult.text = "解算失败，请看弹窗报告！"
-                        android.app.AlertDialog.Builder(this@MainActivity)
-                            .setTitle("🚨 引擎罢工诊断报告")
-                            .setMessage(crashReason)
-                            .setCancelable(false)
-                            .setPositiveButton("关闭") { dialog, _ -> dialog.dismiss() }
-                            .show()
+                        ui.dialog = UiDialog(
+                            getString(R.string.ppp_report_title), crashReason,
+                            getString(R.string.action_close), cancelable = false,
+                        )
                     }
                     btnRunPpp.isEnabled = true
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
-                    tvPppResult.text = "❌ 发生异常: ${e.message}"
+                    tvPppResult.text = "发生异常: ${e.message}"
                     btnRunPpp.isEnabled = true
                 }
             }

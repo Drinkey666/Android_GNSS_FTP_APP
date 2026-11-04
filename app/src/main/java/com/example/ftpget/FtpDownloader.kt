@@ -1,6 +1,7 @@
 package com.example.ftpget // ★ 注意：保持你真实的包名 ★
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
 import org.apache.commons.net.ftp.FTP
 import org.apache.commons.net.ftp.FTPClient
@@ -113,7 +114,8 @@ object FtpDownloader {
         remoteName: String,
         destination: File,
         total: Long,
-        callback: (String, Long, Long) -> Unit
+        callback: (String, Long, Long) -> Unit,
+        validate: (File) -> Boolean = { true }
     ): Boolean {
         val temporaryFile = File(destination.parentFile, "${destination.name}.part")
         try {
@@ -125,6 +127,7 @@ object FtpDownloader {
                 (total > 0L && temporaryFile.length() != total)) return false
             if (destination.name.endsWith(".gz", ignoreCase = true) &&
                 !validGzip(temporaryFile)) return false
+            if (!validate(temporaryFile)) return false
             publishDownload(temporaryFile, destination)
             progress.finish()
             return true
@@ -141,11 +144,43 @@ object FtpDownloader {
     ) {
         val total = connection.contentLengthLong.takeIf { it > 0L } ?: -1L
         val progress = ProgressOutputStream(FileOutputStream(destination), fileName, total, callback)
-        connection.inputStream.use { input -> progress.use { input.copyTo(it) } }
+        // 先进入输出流use；连inputStream打开都超时时也必须关闭.part句柄。
+        progress.use { output -> connection.inputStream.use { input -> input.copyTo(output) } }
         if (total > 0L && destination.length() != total) {
             throw java.io.IOException("文件大小不匹配：${destination.length()} / $total")
         }
         progress.finish()
+    }
+
+    /** 同一URL网络失败时先重试，不把timeout误当成“该日期/版本没有产品”。 */
+    internal suspend fun downloadHttpFile(
+        url: String,
+        destination: File,
+        label: String,
+        connectionFactory: (URL) -> HttpURLConnection = { it.openConnection() as HttpURLConnection },
+        authorization: String? = null,
+        validate: (File) -> Boolean,
+        onTransferProgress: (String, Long, Long) -> Unit,
+        onProgress: (String) -> Unit
+    ): Int = DownloadNetworkPolicy.retry("$label ${destination.name}", onProgress) {
+        val temporary = File(destination.parentFile, "${destination.name}.part")
+        val connection = connectionFactory(URL(url))
+        try {
+            DownloadNetworkPolicy.configure(connection)
+            if (authorization != null) connection.setRequestProperty("Authorization", authorization)
+            val status = connection.responseCode
+            DownloadNetworkPolicy.checkHttpStatus(status)
+            if (status != HttpURLConnection.HTTP_OK) return@retry status
+            copyHttpWithProgress(connection, temporary, destination.name, onTransferProgress)
+            if (!validate(temporary)) {
+                onProgress("⚠️ $label 内容校验失败：${destination.name}；保留原完整文件")
+                return@retry -1
+            }
+            publishDownload(temporary, destination)
+            status
+        } finally {
+            try { connection.disconnect() } finally { temporary.delete() }
+        }
     }
 
     // ==========================================
@@ -153,6 +188,71 @@ object FtpDownloader {
     // 文件位于 /pub/gnss/products/mgex/<GPS周>，例如：
     // WUM0MGXNRT_20262641200_02D_05M_CLK.CLK[.gz]
     // ==========================================
+    suspend fun downloadLatestWhuNrtPair(
+        server: String,
+        savePath: File,
+        referenceUtcMillis: Long = System.currentTimeMillis(),
+        clientFactory: () -> FTPClient = { FTPClient() },
+        onTransferProgress: (String, Long, Long) -> Unit = { _, _, _ -> },
+        onPairDirectory: (String) -> Unit = {},
+        onProgress: (String) -> Unit
+    ): Boolean = DownloadNetworkPolicy.download("NRT轨道/钟差 FTP $server", onProgress) {
+      withContext(Dispatchers.IO) {
+        val ftp = clientFactory()
+        try {
+            DownloadNetworkPolicy.configure(ftp)
+            onProgress("🌐 NRT FTP连接/登录：$server")
+            ftp.connect(server, 21)
+            if (!ftp.login("anonymous", "guest@")) {
+                onProgress("❌ WHU 匿名登录失败")
+                return@withContext false
+            }
+            ftp.enterLocalPassiveMode()
+            ftp.setFileType(FTP.BINARY_FILE_TYPE)
+            val files = linkedMapOf<String, org.apache.commons.net.ftp.FTPFile>()
+            for (dir in NrtProductPolicy.weekDirectories(referenceUtcMillis)) {
+                onProgress("🔎 检索最新 NRT 配套产品：$dir")
+                if (!ftp.changeWorkingDirectory(dir)) {
+                    onProgress("⚠️ WHU 目录尚不可用：$dir（${ftp.replyCode}）")
+                    continue
+                }
+                onProgress("📂 NRT读取目录：$dir（数据空闲超时${DownloadNetworkPolicy.READ_MS/1000}s）")
+                for (file in ftp.listFiles().orEmpty()) {
+                    if (file.isFile && NrtProductPolicy.parse(file.name) != null) files[file.name] = file
+                }
+            }
+            val pairs = NrtProductPolicy.pairs(files.keys, referenceUtcMillis)
+            for (pair in pairs) {
+                val week = NrtProductPolicy.weekDirectories(pair.start).first()
+                if (!ftp.changeWorkingDirectory(week)) continue
+                onProgress("⬇️ 下载同一时次 NRT：${pair.orbit} + ${pair.clock}")
+                onProgress("⬇️ NRT读取文件：${pair.orbit}")
+                val sp3 = retrieveWithProgress(ftp, pair.orbit, File(savePath, pair.orbit),
+                    files.getValue(pair.orbit).size, onTransferProgress)
+                if (sp3) onProgress("⬇️ NRT读取文件：${pair.clock}")
+                val clk = sp3 && retrieveWithProgress(ftp, pair.clock, File(savePath, pair.clock),
+                    files.getValue(pair.clock).size, onTransferProgress)
+                if (sp3 && clk) {
+                    onPairDirectory(week)
+                    onProgress("🎯 最新可用 NRT 轨道与钟差下载完成；标称时段覆盖本次下载时刻")
+                    return@withContext true
+                }
+                onProgress("⚠️ 该时次传输失败，尝试下一组仍覆盖当前时间的配套产品")
+            }
+            onProgress("❌ 未找到覆盖当前时间的完整 NRT SP3/CLK；不把过期文件冒充实时产品")
+            false
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (DownloadNetworkPolicy.isTransient(e)) throw e
+            onProgress("❌ NRT 配套产品下载失败：${e.message}")
+            false
+        } finally {
+            if (ftp.isConnected) try { ftp.disconnect() } catch (_: Exception) { }
+        }
+      }
+    }
+
     suspend fun downloadWhuNrtProduct(
         server: String,
         remoteDir: String,
@@ -161,12 +261,12 @@ object FtpDownloader {
         savePath: File,
         onTransferProgress: (String, Long, Long) -> Unit = { _, _, _ -> },
         onProgress: (String) -> Unit
-    ): Boolean = withContext(Dispatchers.IO) {
+    ): Boolean = DownloadNetworkPolicy.download("NRT $productSuffix FTP $server", onProgress) {
+      withContext(Dispatchers.IO) {
         val ftp = FTPClient()
         try {
             onProgress("🌐 正在连接: $server...")
-            ftp.connectTimeout = 15000
-            ftp.setDataTimeout(15000)
+            DownloadNetworkPolicy.configure(ftp)
 
             ftp.connect(server, 21)
             if (!ftp.login("anonymous", "guest@")) {
@@ -182,6 +282,7 @@ object FtpDownloader {
                 return@withContext false
             }
 
+            onProgress("📂 NRT读取目录：$remoteDir")
             val files = ftp.listFiles()
             if (files == null || files.isEmpty()) {
                 onProgress("❌ 目录为空: $remoteDir")
@@ -215,7 +316,9 @@ object FtpDownloader {
                 return@withContext false
             }
 
-        } catch (e: Exception) {
+        } catch (e: CancellationException) { throw e }
+        catch (e: Exception) {
+            if (DownloadNetworkPolicy.isTransient(e)) throw e
             onProgress("❌ 抓取异常: ${e.message}")
             return@withContext false
         } finally {
@@ -223,90 +326,252 @@ object FtpDownloader {
                 try { ftp.disconnect() } catch (e: Exception) { }
             }
         }
+      }
     }
 
-    /* 保留旧的通用下载器，当前用于 phasebias 目录的 OSB 文件。 */
-    suspend fun downloadLatestProduct(
+    /** Only NRT OSB from the successfully downloaded SP3/CLK directory. Never use phasebias/RTS. */
+    suspend fun downloadWhuNrtBias(
         server: String,
         remoteDir: String,
-        yearStr: String,
-        doyStr: String,
-        keyword: String,
         savePath: File,
+        clientFactory: () -> FTPClient = { FTPClient() },
         onTransferProgress: (String, Long, Long) -> Unit = { _, _, _ -> },
         onProgress: (String) -> Unit
-    ): Boolean = withContext(Dispatchers.IO) {
-        val ftp = FTPClient()
+    ): Boolean = DownloadNetworkPolicy.download("NRT BIA FTP $server", onProgress) {
+      withContext(Dispatchers.IO) {
+        require(Regex("^/pub/gnss/products/mgex/\\d+/?$").matches(remoteDir)) {
+            "NRT BIA 必须来自配套轨道/钟差的 MGEX GPS 周目录"
+        }
+        val ftp = clientFactory()
         try {
-            ftp.connectTimeout = 15000
-            ftp.setDataTimeout(15000)
+            DownloadNetworkPolicy.configure(ftp)
+            onProgress("🌐 BIA FTP连接/登录：$server")
             ftp.connect(server, 21)
             if (!ftp.login("anonymous", "guest@")) return@withContext false
             ftp.enterLocalPassiveMode()
             ftp.setFileType(FTP.BINARY_FILE_TYPE)
-            if (!ftp.changeWorkingDirectory(remoteDir)) return@withContext false
+            if (!ftp.changeWorkingDirectory(remoteDir)) {
+                onProgress("❌ NRT BIA 目录不可用：$remoteDir；不改用 RTS")
+                return@withContext false
+            }
 
-            val targetDate = "$yearStr$doyStr"
-            val targetFile = ftp.listFiles()
-                ?.filter { file ->
-                    file.isFile && file.name.contains(targetDate) &&
-                        file.name.contains(keyword, ignoreCase = true) &&
-                        file.name.endsWith(".gz", ignoreCase = true)
-                }
-                ?.maxByOrNull { it.name }
-                ?: return@withContext false
+            onProgress("📂 NRT BIA读取配套目录：$remoteDir，仅接受 WUM0MGXNRT_*_OSB.BIA[.gz]")
+            val files = ftp.listFiles().orEmpty().filter { it.isFile }.associateBy { it.name }
+            val name = NrtBiasPolicy.latest(files.keys)
+            if (name == null) {
+                onProgress("⚠️ 配套目录未找到 NRT BIA：$remoteDir；不下载 RTS，不访问 phasebias 目录")
+                return@withContext false
+            }
+            val targetFile = files.getValue(name)
 
             val localFile = File(savePath, targetFile.name)
-            onProgress("⬇️ 开始下载偏差产品: ${targetFile.name} ...")
+            onProgress("⬇️ 开始下载 NRT 偏差产品: ${targetFile.name} ...")
             val success = retrieveWithProgress(
                 ftp, targetFile.name, localFile, targetFile.size, onTransferProgress
             )
+            if (success) onProgress("🎯 NRT BIA 下载完成：${targetFile.name}；内部 OSB 有效期仍由解算器检查，不外推、不替换为 RTS")
+            else onProgress("❌ NRT BIA 传输/完整性检查失败：${targetFile.name}；不改用 RTS")
             success
-        } catch (e: Exception) {
+        } catch (e: CancellationException) { throw e }
+        catch (e: Exception) {
+            if (DownloadNetworkPolicy.isTransient(e)) throw e
             onProgress("❌ 偏差产品下载异常: ${e.message}")
             false
         } finally {
             if (ftp.isConnected) try { ftp.disconnect() } catch (_: Exception) { }
         }
+      }
+    }
+
+    /** Download the latest published RTS BIA; daily files are refreshed even if already present. */
+    suspend fun downloadWhuRtsBias(
+        server: String,
+        savePath: File,
+        referenceUtcMillis: Long = System.currentTimeMillis(),
+        clientFactory: () -> FTPClient = { FTPClient() },
+        onTransferProgress: (String, Long, Long) -> Unit = { _, _, _ -> },
+        onProgress: (String) -> Unit
+    ): Boolean = DownloadNetworkPolicy.download("RTS BIA FTP $server", onProgress) {
+      withContext(Dispatchers.IO) {
+        val ftp = clientFactory()
+        try {
+            DownloadNetworkPolicy.configure(ftp)
+            onProgress("🌐 RTS BIA FTP连接/登录：$server")
+            ftp.connect(server, 21)
+            if (!ftp.login("anonymous", "guest@")) return@withContext false
+            ftp.enterLocalPassiveMode()
+            ftp.setFileType(FTP.BINARY_FILE_TYPE)
+            for (remoteDir in RtsBiasPolicy.directories(referenceUtcMillis)) {
+                if (!ftp.changeWorkingDirectory(remoteDir)) {
+                    onProgress("⚠️ RTS BIA 目录不可用：$remoteDir")
+                    continue
+                }
+                onProgress("📂 RTS BIA读取目录：$remoteDir")
+                val files = ftp.listFiles().orEmpty().filter { it.isFile }.associateBy { it.name }
+                val year = remoteDir.split('/').dropLast(1).last()
+                val name = RtsBiasPolicy.latest(files.keys.filter {
+                    it.startsWith("WUM0MGXRTS_$year", ignoreCase = true)
+                }, referenceUtcMillis) ?: continue
+                val target = files.getValue(name)
+                onProgress("⬇️ 开始下载最新 RTS 偏差产品：$name（同名文件也重新获取）")
+                val success = retrieveWithProgress(ftp, name, File(savePath, name),
+                    target.size, onTransferProgress)
+                if (success) onProgress("🎯 RTS BIA 下载完成：$name；码/相位覆盖分别检查，不外推有效期；与 NRT 轨钟的参考兼容性须核对")
+                else onProgress("❌ RTS BIA 传输/完整性检查失败：$name；保留旧文件")
+                return@withContext success
+            }
+            onProgress("❌ 未找到可下载的 RTS BIA；不回退下载 NRT BIA")
+            false
+        } catch (e: CancellationException) { throw e }
+        catch (e: Exception) {
+            if (DownloadNetworkPolicy.isTransient(e)) throw e
+            onProgress("❌ RTS BIA 下载异常：${e.javaClass.simpleName}")
+            false
+        } finally {
+            if (ftp.isConnected) try { ftp.disconnect() } catch (_: Exception) { }
+        }
+      }
     }
 
     // ==========================================
     // 引擎 2：跨国直连获取最新广播星历 (NAV)
     // ==========================================
-    suspend fun downloadNavProduct(
+    internal suspend fun downloadNavOverHttps(
+        remoteDirectories: List<String>,
+        savePath: File,
+        referenceUtcMillis: Long,
+        maxDaysBack: Int,
+        connectionFactory: (URL) -> HttpURLConnection = { it.openConnection() as HttpURLConnection },
+        onTransferProgress: (String, Long, Long) -> Unit = { _, _, _ -> },
+        onProgress: (String) -> Unit
+    ): Boolean {
+        val root = "https://igs.bkg.bund.de/root_ftp"
+        fun connection(url: String) = connectionFactory(URL(url)).apply { DownloadNetworkPolicy.configure(this) }
+        for ((daysAgo, dir) in remoteDirectories.withIndex()) {
+            onProgress("🔎 HTTPS 广播星历 UTC 回退 $daysAgo 天：$dir")
+            val names = try {
+                DownloadNetworkPolicy.retry("NAV HTTPS目录 $dir", onProgress) {
+                    val listing = connection("$root$dir")
+                    try {
+                        val status = listing.responseCode
+                        DownloadNetworkPolicy.checkHttpStatus(status)
+                        if (status != HttpURLConnection.HTTP_OK) {
+                            onProgress("⚠️ NAV HTTPS 目录暂不可用（HTTP $status），继续回退")
+                            emptyList()
+                        } else listing.inputStream.bufferedReader().use { BroadcastNavPolicy.listingNames(it.readText()) }
+                    } finally { listing.disconnect() }
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                if (DownloadNetworkPolicy.isTransient(e)) {
+                    onProgress("⚠️ NAV HTTPS目录网络重试耗尽；不把超时误当目录未生成，交给FTP后备通道")
+                    return false
+                }
+                onProgress("⚠️ NAV HTTPS 目录访问异常：${e.message}；继续回退")
+                emptyList()
+            }
+            val candidates = BroadcastNavPolicy.candidates(names, referenceUtcMillis, maxDaysBack)
+            if (candidates.isEmpty()) onProgress("⚠️ 此 UTC 日期尚无可用 RINEX3 NAV 文件")
+            for (name in candidates) {
+                val target = File(savePath, name)
+                try {
+                    onProgress("⬇️ HTTPS 下载广播星历：$name")
+                    val compressed = name.endsWith(".gz", ignoreCase = true)
+                    val status = downloadHttpFile("$root$dir$name", target, "NAV HTTPS文件",
+                        connectionFactory = connectionFactory,
+                        validate = { temporary -> (!compressed || validGzip(temporary)) &&
+                            BroadcastNavPolicy.validRinex3(temporary, compressed) },
+                        onTransferProgress = onTransferProgress, onProgress = onProgress)
+                    if (status != HttpURLConnection.HTTP_OK) {
+                        onProgress("⚠️ NAV 未下载（HTTP/校验状态 $status）：$name；尝试下一候选")
+                        continue
+                    }
+                    if (daysAgo > 0) onProgress("⚠️ 使用回退广播星历：$name；不是当天产品，" +
+                        "是否仍适用当前观测须由 RTKLIB 按星历 TOE/有效期检查")
+                    onProgress("🎯 最新可用广播星历下载完成：$name（HTTPS）")
+                    return true
+                } catch (e: CancellationException) { throw e }
+                catch (e: Exception) {
+                    if (DownloadNetworkPolicy.isTransient(e)) {
+                        onProgress("⚠️ NAV HTTPS文件网络重试耗尽：$name；尝试FTP后备，而不是换旧日期掩盖网络故障")
+                        return false
+                    }
+                    onProgress("⚠️ NAV HTTPS 下载异常：${e.message}；尝试下一候选")
+                }
+            }
+        }
+        return false
+    }
+
+    internal suspend fun downloadNavProduct(
         server: String,
         remoteDir: String,
         savePath: File,
+        referenceUtcMillis: Long = System.currentTimeMillis(),
+        maxDaysBack: Int = 3,
+        clientFactory: () -> FTPClient = { FTPClient() },
+        preferHttps: Boolean = true,
         onTransferProgress: (String, Long, Long) -> Unit = { _, _, _ -> },
         onProgress: (String) -> Unit
     ): Boolean = withContext(Dispatchers.IO) {
-        val ftp = FTPClient()
+        val directories = BroadcastNavPolicy.directories(remoteDir, maxDaysBack)
+        onProgress("🌐 获取最新广播星历：按 UTC 日期从新到旧检索...")
+        // HTTPS自己已按资源重试；FTP重连不能再次套一轮HTTPS，避免3×3重复等待。
+        if (preferHttps && (server == "igs-ftp.bkg.bund.de" || server == "igs.bkg.bund.de")) {
+            if (downloadNavOverHttps(directories, savePath, referenceUtcMillis, maxDaysBack,
+                onTransferProgress = onTransferProgress, onProgress = onProgress)) return@withContext true
+            onProgress("⚠️ BKG HTTPS 未取得 NAV，尝试 FTP 后备通道")
+        }
+        DownloadNetworkPolicy.download("NAV广播星历 FTP $server", onProgress) {
+      withContext(Dispatchers.IO) {
+        val ftp = clientFactory()
         try {
-            onProgress("🌐 直连 BKG 服务器获取广播星历...")
-            ftp.connectTimeout = 15000
-            ftp.setDataTimeout(15000)
+            DownloadNetworkPolicy.configure(ftp)
+            onProgress("🌐 NAV FTP连接/登录：$server")
             ftp.connect(server, 21)
-            ftp.login("anonymous", "guest@")
+            if (!ftp.login("anonymous", "guest@")) {
+                onProgress("❌ 广播星历 FTP 登录失败（${ftp.replyCode}）")
+                return@withContext false
+            }
             ftp.enterLocalPassiveMode()
             ftp.setFileType(FTP.BINARY_FILE_TYPE)
-
-            if (!ftp.changeWorkingDirectory(remoteDir)) return@withContext false
-
-            val files = ftp.listFiles()
-            val targetFile = files?.filter { it.isFile && it.name.endsWith("MN.rnx.gz", ignoreCase = true) }
-                ?.maxByOrNull { it.timestamp }
-
-            if (targetFile == null) return@withContext false
-
-            val localFile = File(savePath, targetFile.name)
-            onProgress("⬇️ 开始拉取: ${targetFile.name} ...")
-            return@withContext retrieveWithProgress(
-                ftp, targetFile.name, localFile, targetFile.size, onTransferProgress
-            )
+            for ((daysAgo, dir) in directories.withIndex()) {
+                onProgress("🔎 广播星历 UTC 回退 $daysAgo 天：$dir")
+                if (!ftp.changeWorkingDirectory(dir)) {
+                    onProgress("⚠️ NAV 目录尚未生成或不可访问（${ftp.replyCode}），继续查找")
+                    continue
+                }
+                onProgress("📂 NAV读取目录：$dir")
+                val files = ftp.listFiles().orEmpty().filter { it.isFile }.associateBy { it.name }
+                val candidates = BroadcastNavPolicy.candidates(files.keys, referenceUtcMillis, maxDaysBack)
+                if (candidates.isEmpty()) onProgress("⚠️ 该目录暂无兼容的 RINEX3 混合广播星历，继续回退")
+                for (name in candidates) {
+                    onProgress("⬇️ 下载广播星历：$name")
+                    val success = retrieveWithProgress(ftp, name, File(savePath, name),
+                        files.getValue(name).size, onTransferProgress) { temporary ->
+                        BroadcastNavPolicy.validRinex3(temporary, name.endsWith(".gz", ignoreCase = true))
+                    }
+                    if (success) {
+                        if (daysAgo > 0) onProgress("⚠️ 使用回退广播星历：$name；不是当天产品，" +
+                            "是否仍适用当前观测须由 RTKLIB 按星历 TOE/有效期检查")
+                        onProgress("🎯 最新可用广播星历下载完成：$name")
+                        return@withContext true
+                    }
+                    onProgress("⚠️ NAV 传输或 RINEX3 内容校验失败：$name；继续尝试")
+                }
+            }
+            onProgress("❌ 今日及前 $maxDaysBack 天均未找到可下载的 RINEX3 混合广播星历")
+            false
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            return@withContext false
+            if (DownloadNetworkPolicy.isTransient(e)) throw e
+            onProgress("❌ 广播星历连接/下载异常：${e.message}")
+            false
         } finally {
             if (ftp.isConnected) try { ftp.disconnect() } catch (e: Exception) { }
+        }
+      }
         }
     }
 
@@ -360,49 +625,32 @@ object FtpDownloader {
                 )
                 val localFile = File(savePath, fileName)
 
-                val temporaryFile = File(savePath, "$fileName.part")
-                if (temporaryFile.exists()) temporaryFile.delete()
-
                 val fileUrl = "https://www.aiub.unibe.ch/download/CODE/IONO/PRD/$fileName"
                 onProgress("🌐 正在尝试 CODE $productId 电离层预报: $fileName ...")
-
-                val connection = (URL(fileUrl).openConnection() as HttpURLConnection).apply {
-                    requestMethod = "GET"
-                    connectTimeout = 15_000
-                    readTimeout = 30_000
-                    instanceFollowRedirects = true
-                }
-
                 try {
-                    val responseCode = connection.responseCode
+                    val responseCode = downloadHttpFile(fileUrl, localFile, "IONEX HTTPS文件",
+                        validate = { validGzip(it) }, onTransferProgress = onTransferProgress, onProgress = onProgress)
                     if (responseCode != HttpURLConnection.HTTP_OK) {
                         onProgress("⚠️ CODE $productId 暂不可用（HTTP $responseCode），尝试下一版本...")
                         continue
                     }
-
-                    copyHttpWithProgress(connection, temporaryFile, fileName, onTransferProgress)
-
-                    if (!validGzip(temporaryFile)) {
-                        temporaryFile.delete()
-                        onProgress("⚠️ CODE $productId gzip 校验失败，尝试下一版本...")
-                        continue
-                    }
-                    publishDownload(temporaryFile, localFile)
-
                     onProgress("🎯 电离层预报下载成功（$productId）: $fileName")
                     return@withContext true
-                } catch (e: Exception) {
-                    temporaryFile.delete()
+                } catch (e: CancellationException) { throw e }
+                catch (e: Exception) {
+                    if (DownloadNetworkPolicy.isTransient(e)) {
+                        onProgress("❌ IONEX网络重试耗尽：$fileName；这不表示P0D至P4D产品都未发布")
+                        return@withContext false
+                    }
                     onProgress("⚠️ CODE $productId 访问异常（${e.message}），尝试下一版本...")
-                } finally {
-                    connection.disconnect()
                 }
             }
 
             onProgress("❌ CODE P0D 至 P4D 均未提供 $year 年第 $formattedDoy 天的电离层文件。")
             return@withContext false
 
-        } catch (e: Exception) {
+        } catch (e: CancellationException) { throw e }
+        catch (e: Exception) {
             onProgress("❌ 构建电离层路径异常: ${e.message}")
             return@withContext false
         }
@@ -439,29 +687,13 @@ object FtpDownloader {
                 val fileName = "VMF3_${date}.H%02d".format(Locale.US, hour)
                 val localFile = File(savePath, fileName)
 
-                val temporaryFile = File(savePath, "$fileName.part")
-                if (temporaryFile.exists()) temporaryFile.delete()
-
                 onProgress("⬇️ 正在下载 VMF3 预报: $fileName ...")
-                val connection = (URL("$remoteDir/$fileName").openConnection() as HttpURLConnection).apply {
-                    requestMethod = "GET"
-                    connectTimeout = 15_000
-                    readTimeout = 30_000
-                    instanceFollowRedirects = true
-                    setRequestProperty("Authorization", "Basic $authorization")
-                }
-
-                try {
-                    when (val responseCode = connection.responseCode) {
+                    val responseCode = downloadHttpFile("$remoteDir/$fileName", localFile, "VMF3 HTTPS文件",
+                        authorization = "Basic $authorization",
+                        validate = { reusableVmf3File(it, year, month, day, hour) },
+                        onTransferProgress = onTransferProgress, onProgress = onProgress)
+                    when (responseCode) {
                         HttpURLConnection.HTTP_OK -> {
-                            copyHttpWithProgress(connection, temporaryFile, fileName, onTransferProgress)
-
-                            if (!reusableVmf3File(temporaryFile, year, month, day, hour)) {
-                                temporaryFile.delete()
-                                onProgress("❌ VMF3 文件内容校验失败: $fileName")
-                                return@withContext false
-                            }
-                            publishDownload(temporaryFile, localFile)
                             onProgress("🎯 VMF3 预报下载成功: $fileName")
                         }
 
@@ -480,13 +712,11 @@ object FtpDownloader {
                             return@withContext false
                         }
                     }
-                } finally {
-                    connection.disconnect()
-                }
             }
 
             true
-        } catch (e: Exception) {
+        } catch (e: CancellationException) { throw e }
+        catch (e: Exception) {
             onProgress("❌ VMF3 下载异常: ${e.message}")
             false
         }

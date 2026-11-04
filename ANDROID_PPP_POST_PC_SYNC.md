@@ -1,5 +1,7 @@
 # Android RINEX 后处理与 PC RTKLIB 同步
 
+> 2026-10-20更新：实时与后处理已共用唯一`android_b_verified.h`配置入口并同步当前32文件快照。见`docs/ANDROID_B_VERIFIED_PORT_20261020.md`；后处理APK构建通过，尚未完成新版APK上的RINEX端到端设备对照。
+
 ## 现状
 
 “RINEX 后处理 PPP（PC 内核）”现编译 `ppp_live/rtklib` 中的 PC 源码快照，包括 `ppp.c`、`rtkpos.c`、`rinex.c`、`postpos.c`、`rtcm*.c` 等。实时 PPP 仍使用独立的 `gnss_ppp_live` 动态库，两条入口互不复用滤波状态。原先 Android 目录 `cpp/rtklib` 里的旧内核不再参与 `rtklib_engine` 构建；这些旧文件未被覆盖。

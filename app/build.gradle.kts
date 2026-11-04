@@ -3,6 +3,7 @@ import java.util.Properties
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.compose.compiler)
 }
 
 // 本地凭据文件被 Git 忽略；新机器可以从 example 复制后填写，不能提交真实密码。
@@ -41,6 +42,7 @@ android {
     }
     buildFeatures {
         buildConfig = true
+        compose = true
     }
     externalNativeBuild {
         cmake {
@@ -78,6 +80,11 @@ dependencies {
     implementation(libs.material)
     implementation(libs.androidx.activity)
     implementation(libs.androidx.constraintlayout)
+    implementation(platform(libs.androidx.compose.bom))
+    implementation(libs.androidx.compose.material3)
+    implementation(libs.androidx.compose.ui.tooling.preview)
+    implementation(libs.androidx.activity.compose)
+    debugImplementation(libs.androidx.compose.ui.tooling)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

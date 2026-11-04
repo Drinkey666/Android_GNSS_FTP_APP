@@ -57,7 +57,6 @@
 #define MAXDTE      900.0           /* max time difference to ephem time (s) */
 #define EXTERR_CLK  1E-3            /* extrapolation error for clock (m/s) */
 #define EXTERR_EPH  5E-7            /* extrapolation error for ephem (m/s^2) */
-#define MAX_BIAS_SYS 4              /* # of constellations supported */
 
 /* table to translate code to code bias table index  */
 /* =============================================================================
@@ -545,6 +544,58 @@ static int sys2ix(int sys)
     return -1;
 }
 
+extern int bias_clock_ref_status(const nav_t *nav,int sat)
+{
+    int ix;
+    if(!nav || sat<1 || sat>MAXSAT)return 0;
+    ix=sys2ix(satsys(sat,NULL));
+    return ix<0 || ix>=MAX_BIAS_SYS ? 0 : nav->clock_ref_status[ix];
+}
+
+/* Clock datum is declared in the Bias-SINEX header as RINEX code signals.
+ * Keep the two distinct physical ANTEX frequencies and one code for each;
+ * GLONASS needs the code to recover each satellite's FDMA frequency. */
+static void read_clock_ref(char **tok,int nt,nav_t *nav)
+{
+    int sys=0,ix,i,n=0,id[2]={0},code[2]={0};
+    if(nt<4 || strlen(tok[1])!=1)return;
+    switch(tok[1][0]) {
+        case 'G':sys=SYS_GPS;break;case 'R':sys=SYS_GLO;break;
+        case 'E':sys=SYS_GAL;break;case 'C':sys=SYS_CMP;break;
+        case 'J':sys=SYS_QZS;break;case 'I':sys=SYS_IRN;break;
+        default:return;
+    }
+    ix=sys2ix(sys);if(ix<0 || ix>=MAX_BIAS_SYS)return;
+    for(i=2;i<nt;i++) {
+        int f,c;
+        if(strlen(tok[i])!=3 || tok[i][0]!='C' ||
+           tok[i][1]<'1' || tok[i][1]>'9') {n=0;break;}
+        f=tok[i][1]-'0';c=obs2code(tok[i]+1);
+        if(c==CODE_NONE || code2idx(sys,(uint8_t)c)<0) {n=0;break;}
+        if((n>0 && f==id[0]) || (n>1 && f==id[1]))continue;
+        if(n>=2) {n=0;break;} /* more than two clock bands is ambiguous */
+        id[n]=f;code[n]=c;n++;
+    }
+    if(n!=2 || id[0]==id[1]) {
+        nav->clock_ref_status[ix]=2;
+        trace(1,"readbiaf: invalid clock reference for %c\n",tok[1][0]);
+        return;
+    }
+    if(nav->clock_ref_status[ix]==2)return;
+    if(nav->clock_ref_status[ix]==1 &&
+       (nav->clock_ref_antex[ix][0]!=id[0] ||
+        nav->clock_ref_antex[ix][1]!=id[1])) {
+        nav->clock_ref_status[ix]=2;
+        trace(1,"readbiaf: conflicting clock reference for %c\n",tok[1][0]);
+        return;
+    }
+    nav->clock_ref_status[ix]=1;
+    for(i=0;i<2;i++) {
+        nav->clock_ref_antex[ix][i]=(uint8_t)id[i];
+        nav->clock_ref_code[ix][i]=(uint8_t)code[i];
+    }
+}
+
 /* =============================================================================
  * 函数：code2bias_ix
  * 功能：安全地从全局表格 code_bias_ix 中查询指定系统和观测码类型的偏差表索引号。
@@ -660,6 +711,14 @@ static int readbiaf(const char* file, nav_t* nav)
         if (nt < 2) continue;
 
         kind = tok[0];
+        if (!strcmp(kind,"SATELLITE_CLOCK_REFERENCE_OBSERVABLES")) {
+            read_clock_ref(tok,nt,nav);continue;
+        }
+        if (!strcmp(kind,"APC_MODEL") && !nav->bia_apc_model[0]) {
+            strncpy(nav->bia_apc_model,tok[1],sizeof(nav->bia_apc_model)-1);
+            nav->bia_apc_model[sizeof(nav->bia_apc_model)-1]='\0';
+            continue;
+        }
         if (strcmp(kind, "OSB") && strcmp(kind, "DSB")) continue;
 
         /*
@@ -805,6 +864,10 @@ extern int readdcb(const char* file, nav_t* nav, const sta_t* sta)
         }
     }
     free(nav->osbs); nav->osbs = NULL; nav->nosb = nav->nosbmax = 0;
+    memset(nav->clock_ref_status,0,sizeof(nav->clock_ref_status));
+    memset(nav->clock_ref_antex,0,sizeof(nav->clock_ref_antex));
+    memset(nav->clock_ref_code,0,sizeof(nav->clock_ref_code));
+    nav->bia_apc_model[0]='\0';
 
     /* 为展开多个文件分配内存 */
     for (i = 0; i < MAXEXFILE; i++) {
@@ -996,48 +1059,112 @@ static int pephclk(gtime_t time, int sat, const nav_t* nav, double* dts,
  * 说明：将卫星质心坐标改正为天线发射信号的相位中心坐标。
  * 这是精密定位必须的步骤，因为它处理了不同频率之间的频率相关偏差 (Phase Center Offset)。
  * ============================================================================= */
+static int satant_axes(gtime_t time,const double *rs,double *ex,double *ey,
+                       double *ez)
+{
+    double es[3],r[3],rsun[3],gmst,erpv[5]={0};int i;
+    sunmoonpos(gpst2utc(time), erpv, rsun, NULL, &gmst);
+    for (i = 0; i < 3; i++) r[i] = -rs[i];
+    if (!normv3(r, ez)) return 0;
+    for (i = 0; i < 3; i++) r[i] = rsun[i] - rs[i];
+    if (!normv3(r, es)) return 0;
+    cross3(ez, es, r);
+    if (!normv3(r, ey)) return 0;
+    cross3(ey, ez, ex);
+    return 1;
+}
+
+static int clock_ref_pco(int sat,const nav_t *nav,double *pco)
+{
+    const pcv_t *pcv=nav->pcvs+sat-1;
+    int ix=sys2ix(satsys(sat,NULL));double f1,f2;
+    if(ix<0 || ix>=MAX_BIAS_SYS || nav->clock_ref_status[ix]!=1)return 0;
+    f1=sat2freq(sat,nav->clock_ref_code[ix][0],nav);
+    f2=sat2freq(sat,nav->clock_ref_code[ix][1],nav);
+    return pcv_antex_if_pco(pcv,nav->clock_ref_antex[ix][0],
+        nav->clock_ref_antex[ix][1],f1,f2,pco);
+}
+
+static int satantoff_checked(gtime_t time,const double *rs,int sat,
+                             const nav_t *nav,double *dant)
+{
+    const pcv_t *pcv=nav->pcvs+sat-1;
+    double ex[3],ey[3],ez[3],pco[3],freq[2],C1,C2,denom;
+    int i,sys=satsys(sat,NULL),ix=sys2ix(sys),product=0;
+    dant[0]=dant[1]=dant[2]=0.0;
+    if(!nav->legacy_product_reference && ix>=0 && ix<MAX_BIAS_SYS &&
+       nav->clock_ref_status[ix]) {
+        /* A declared product datum must never silently use another pair or
+         * a zero PCO when its ANTEX calibration is absent. */
+        if(nav->clock_ref_status[ix]!=1 || !clock_ref_pco(sat,nav,pco)) {
+            trace(2,"SAT_APC_INVALID,sat=%d,reason=CLOCK_REF_OR_PCO_MISSING\n",sat);
+            return 0;
+        }
+        product=1;
+    }
+    else {
+        /* No Bias-SINEX datum: retain the exact historical RTKLIB pair. */
+        if (sys == SYS_GPS || sys == SYS_QZS) { freq[0] = FREQL1; freq[1] = FREQL2; }
+        else if (sys == SYS_GLO) { freq[0] = sat2freq(sat, CODE_L1C, nav); freq[1] = sat2freq(sat, CODE_L2C, nav); }
+        else if (sys == SYS_GAL) { freq[0] = FREQL1; freq[1] = FREQE5b; }
+        else if (sys == SYS_CMP) { freq[0] = FREQ1_CMP; freq[1] = FREQ2_CMP; }
+        else if (sys == SYS_IRN) { freq[0] = FREQL5; freq[1] = FREQs; }
+        else return 1;
+        denom=SQR(freq[0])-SQR(freq[1]);
+        if(!isfinite(denom) || denom==0.0)return 0;
+        C1=SQR(freq[0])/denom;C2=-SQR(freq[1])/denom;
+    }
+    if(!satant_axes(time,rs,ex,ey,ez))return 0;
+    for(i=0;i<3;i++) {
+        if(product)dant[i]=pco[0]*ex[i]+pco[1]*ey[i]+pco[2]*ez[i];
+        else {
+            double dant1=pcv->off[0][0]*ex[i]+pcv->off[0][1]*ey[i]+pcv->off[0][2]*ez[i];
+            double dant2=pcv->off[1][0]*ex[i]+pcv->off[1][1]*ey[i]+pcv->off[1][2]*ez[i];
+            dant[i]=C1*dant1+C2*dant2;
+        }
+    }
+    return 1;
+}
+
 extern void satantoff(gtime_t time, const double* rs, int sat, const nav_t* nav,
     double* dant)
 {
-    const pcv_t* pcv = nav->pcvs + sat - 1;
-    double ex[3], ey[3], ez[3], es[3], r[3], rsun[3], gmst, erpv[5] = { 0 }, freq[2];
-    double C1, C2, dant1, dant2;
-    int i, sys;
+    if(sat<1 || sat>MAXSAT || !nav || !dant)return;
+    satantoff_checked(time,rs,sat,nav,dant);
+}
 
-    char tstr[40];
-    trace(4, "satantoff: time=%s sat=%2d\n", time2str(time, tstr, 3), sat);
-
-    dant[0] = dant[1] = dant[2] = 0.0;
-
-    /* 计算太阳在 ECEF 系中的位置，用于卫星姿态判断 */
-    sunmoonpos(gpst2utc(time), erpv, rsun, NULL, &gmst);
-
-    /* 建立卫星本体坐标系 (X, Y, Z) */
-    for (i = 0; i < 3; i++) r[i] = -rs[i];
-    if (!normv3(r, ez)) return;
-    for (i = 0; i < 3; i++) r[i] = rsun[i] - rs[i];
-    if (!normv3(r, es)) return;
-    cross3(ez, es, r);
-    if (!normv3(r, ey)) return;
-    cross3(ey, ez, ex);
-
-    /* 选择无电离层组合的基准频率，用于进行 LC 组合偏移改正 */
-    sys = satsys(sat, NULL);
-    if (sys == SYS_GPS || sys == SYS_QZS) { freq[0] = FREQL1; freq[1] = FREQL2; }
-    else if (sys == SYS_GLO) { freq[0] = sat2freq(sat, CODE_L1C, nav); freq[1] = sat2freq(sat, CODE_L2C, nav); }
-    else if (sys == SYS_GAL) { freq[0] = FREQL1; freq[1] = FREQE5b; }
-    else if (sys == SYS_CMP) { freq[0] = FREQ1_CMP; freq[1] = FREQ2_CMP; }
-    else if (sys == SYS_IRN) { freq[0] = FREQL5; freq[1] = FREQs; }
-    else return;
-
-    C1 = SQR(freq[0]) / (SQR(freq[0]) - SQR(freq[1]));
-    C2 = -SQR(freq[1]) / (SQR(freq[0]) - SQR(freq[1]));
-
-    /* 对双频无电离层组合进行天线相位偏移改正 */
-    for (i = 0; i < 3; i++) {
-        dant1 = pcv->off[0][0] * ex[i] + pcv->off[0][1] * ey[i] + pcv->off[0][2] * ez[i];
-        dant2 = pcv->off[1][0] * ex[i] + pcv->off[1][1] * ey[i] + pcv->off[1][2] * ez[i];
-        dant[i] = C1 * dant1 + C2 * dant2;
+/* Satellite signal PCO relative to the APC used for precise orbit geometry.
+ * e points from receiver to satellite, so subtract e.(O_signal-O_ref) from
+ * each raw range.  Satellite PCV remains a separate per-slot correction. */
+extern void satantpco_delta(gtime_t time,const double *rs,const double *rr,
+    int sat,const nav_t *nav,const uint8_t *codes,int n,double *delta,
+    uint8_t *valid)
+{
+    const pcv_t *pcv;
+    double ex[3],ey[3],ez[3],e[3],r[3],pref[3],pco[3],d[3];
+    int i,k,ix;
+    for(i=0;i<n;i++) {delta[i]=0.0;valid[i]=1;}
+    if(!nav || sat<1 || sat>MAXSAT || !codes)return;
+    ix=sys2ix(satsys(sat,NULL));
+    if(nav->legacy_product_reference || ix<0 || ix>=MAX_BIAS_SYS ||
+       nav->clock_ref_status[ix]!=1)return;
+    pcv=nav->pcvs+sat-1;
+    if(!clock_ref_pco(sat,nav,pref) || !satant_axes(time,rs,ex,ey,ez)) {
+        for(i=0;i<n;i++)valid[i]=0;
+        return;
+    }
+    for(k=0;k<3;k++)r[k]=rs[k]-rr[k];
+    if(!normv3(r,e)) {for(i=0;i<n;i++)valid[i]=0;return;}
+    for(i=0;i<n;i++) {
+        const char *signal;int id;
+        if(!codes[i])continue;
+        signal=code2obs(codes[i]);
+        id=signal && signal[0]>='1' && signal[0]<='9' ? signal[0]-'0' : 0;
+        if(!id || !pcv_antex_pco(pcv,id,pco)) {valid[i]=0;continue;}
+        for(k=0;k<3;k++)d[k]=(pco[0]-pref[0])*ex[k]+
+            (pco[1]-pref[1])*ey[k]+(pco[2]-pref[2])*ez[k];
+        delta[i]=dot3(e,d);
+        if(!isfinite(delta[i])) {delta[i]=0.0;valid[i]=0;}
     }
 }
 
@@ -1069,7 +1196,7 @@ extern int peph2pos(gtime_t time, int sat, const nav_t* nav, int opt,
 
     /* 3. 应用天线相位偏移 (APC) 改正 */
     if (opt) {
-        satantoff(time, rss, sat, nav, dant);
+        if (!satantoff_checked(time, rss, sat, nav, dant)) return 0;
     }
     for (i = 0; i < 3; i++) {
         rs[i] = rss[i] + dant[i];

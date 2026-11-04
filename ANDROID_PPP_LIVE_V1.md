@@ -1,5 +1,7 @@
 # Android GnssMeasurement → JNI → RTKLIB PPP 原型
 
+> 2026-10-20更新：当前已固定B_VERIFIED_v2_JOSEPH并同步32文件，手机ARM64原生660历元对照通过；新版APK安装被设备拒绝，实际JNI仪器测试待补。以`docs/ANDROID_B_VERIFIED_PORT_20261020.md`为准，下方旧哈希/初期状态保留为历史，不再代表当前快照。
+
 ## 当前状态
 
 - 已新增 `gnss_jni.cpp`、`LivePppNative.kt`、`LivePppController.kt`、`LivePppProducts.kt`，并接到 POS 页“启动实时 PPP”按钮；另有“RINEX 后处理 PPP（PC 内核）”入口。

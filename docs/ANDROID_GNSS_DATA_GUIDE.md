@@ -96,6 +96,8 @@ GNSS event = 一个公共 Clock + 多条卫星×信号 measurement
 
 实时转换后观测另存到 `getExternalFilesDir("GNSS_Live")` 中的 `ppp_live_obs_<时间戳>.csv`。这是应用专属目录，卸载可能清除；新版 Android 的文件管理器访问限制不代表文件没有写出。
 
+后来新增公共副本功能：采集页面可选择“内部存储第一层 / FTPGet”目录；采集结束及 OBS 转换完成后自动复制完整文件，应用内原路径不变。旧 TXT 可用“导出最近采集的 TXT”按钮导出。设置步骤见 [公共采集文件位置说明](PUBLIC_GNSS_FILES.md)。
+
 ## 4. Raw TXT 全部 54 列字段字典
 
 下标是 **0 起始**：`tokens[20]` 指第 21 列。每行是一条信号，不是一颗卫星的全部频点。

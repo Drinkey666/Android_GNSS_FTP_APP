@@ -1198,6 +1198,11 @@ static int execses(gtime_t ts, gtime_t te, double ti, const prcopt_t *popt,
         traceopen(tracefile);
         tracelevel(sopt->trace);
     }
+    if(!ionex_time_select(&navs,getenv("RTK_PPP_IONEX_TIME"))) {
+        showmsg("error : RTK_PPP_IONEX_TIME must be CORRECTED or LEGACY");
+        free(rtk_ptr);
+        return 0;
+    }
     /* read ionosphere data file */
     if (*fopt->iono&&(ext=strrchr(fopt->iono,'.'))) {
         if (strlen(ext)==4&&(ext[3]=='i'||ext[3]=='I'||
@@ -1253,6 +1258,10 @@ static int execses(gtime_t ts, gtime_t te, double ti, const prcopt_t *popt,
     if (!dcb_ok) {
         trace(2,"warning: no usable DCB/BIA code-bias product loaded\n");
     }
+    navs.legacy_product_reference=getenv("RTK_PPP_REFERENCE_MODEL") &&
+        !strcmp(getenv("RTK_PPP_REFERENCE_MODEL"),"LEGACY");
+    trace(2,"PRODUCT_REFERENCE_MODEL,%s\n",
+        navs.legacy_product_reference?"LEGACY":"PRODUCT");
     /* set antenna parameters */
     if (popt_.mode!=PMODE_SINGLE) {
         setpcv(obss.n>0?obss.data[0].time:timeget(),&popt_,&navs,&pcvss,&pcvsr,

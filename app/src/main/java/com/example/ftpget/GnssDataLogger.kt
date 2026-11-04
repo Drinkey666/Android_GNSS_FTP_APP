@@ -49,6 +49,13 @@ class GnssDataLogger(private val context: Context) {
         private set
 
     private var fileWriter: BufferedWriter? = null
+    private var repairRecorder: CaptureRepairRecorder? = null
+    var currentRepairFile: File? = null
+        private set
+    var repairFailure: String? = null
+        private set
+    var droppedRepairEpochs: Long = 0
+        private set
 
     // IO 协程只负责磁盘写入；SupervisorJob 避免子任务异常直接取消整个作用域。
     // Channel 容量是 10000 条“measurement 行”，不是 10000 个历元。
@@ -84,13 +91,19 @@ class GnssDataLogger(private val context: Context) {
 
             // 同一回调的所有信号共用这份硬件时钟，不能为每行重新获取手机系统时间代替它。
             val clock = eventArgs.clock
+            val reportedFullTracking = if (Build.VERSION.SDK_INT >= 34 && eventArgs.hasIsFullTracking()) {
+                eventArgs.isFullTracking
+            } else null
 
+            val repairLines = if (repairRecorder != null) ArrayList<String>() else null
             for (measurement in eventArgs.measurements) {
-                val csvLine = formatMeasurementToCsv(clock, measurement)
+                val csvLine = formatMeasurementToCsv(clock, measurement, reportedFullTracking)
+                repairLines?.add(csvLine)
                 if (dataChannel.trySend(csvLine).isFailure) {
                     droppedMeasurements.incrementAndGet()
                 }
             }
+            repairLines?.let { repairRecorder?.offer(it) }
         }
     }
 
@@ -100,7 +113,7 @@ class GnssDataLogger(private val context: Context) {
      * 返回 true 仅表示注册成功，不保证 ADR 有效、每秒都有事件或所有频率都可用。
      */
     @SuppressLint("MissingPermission")
-    fun startRecording(): Boolean {
+    fun startRecording(enableCodePhaseRepair: Boolean = false): Boolean {
         if (isRecording) return false
 
         try {
@@ -143,6 +156,19 @@ class GnssDataLogger(private val context: Context) {
             fileWriter?.write("# \n")
 
             droppedMeasurements.set(0)
+            currentRepairFile = null
+            repairFailure = null
+            droppedRepairEpochs = 0
+            if (enableCodePhaseRepair) {
+                try {
+                    val sidecar = File(dir, "CodePhaseCandidate_$timeString.csv.gz")
+                    repairRecorder = CaptureRepairRecorder(sidecar, coroutineScope)
+                    currentRepairFile = sidecar
+                } catch (error: Exception) {
+                    repairFailure = error.message ?: "REPAIR_START_FAILED"
+                    Log.e(tag, "候选预处理启动失败；原始采集继续", error)
+                }
+            }
 
             // 重置 Channel
             if (dataChannel.isClosedForSend) {
@@ -191,11 +217,16 @@ class GnssDataLogger(private val context: Context) {
             } else {
                 dataChannel.trySend("# RecordingStartFailed")
                 dataChannel.close()
+                repairRecorder?.let { recorder -> coroutineScope.launch { recorder.finish() } }
+                repairRecorder = null
                 locationManager?.removeUpdates(dummyLocationListener)
                 Log.e(tag, "GNSS原始观测回调注册失败")
             }
             return success
         } catch (e: Exception) {
+            dataChannel.close()
+            repairRecorder?.let { recorder -> coroutineScope.launch { recorder.finish() } }
+            repairRecorder = null
             Log.e(tag, "启动异常", e)
             return false
         }
@@ -216,6 +247,12 @@ class GnssDataLogger(private val context: Context) {
         dataChannel.trySend("# DroppedMeasurements,${droppedMeasurements.get()}")
         dataChannel.close()
         writeJob?.join()
+        repairRecorder?.let { recorder ->
+            recorder.finish()
+            repairFailure = recorder.failure
+            droppedRepairEpochs = recorder.droppedEpochs.get()
+        }
+        repairRecorder = null
         return currentSaveFile
     }
 
@@ -224,24 +261,23 @@ class GnssDataLogger(private val context: Context) {
      * 时间(ns)、距离(m)、频率(Hz)保持 Android 原单位，转换器之后再生成 P/L/D/S。
      * 54 列完整字典见 docs/ANDROID_GNSS_DATA_GUIDE.md；空字符串表示未提供。
      */
-    private fun formatMeasurementToCsv(clock: GnssClock, measurement: GnssMeasurement): String {
+    private fun formatMeasurementToCsv(clock: GnssClock, measurement: GnssMeasurement, reportedFullTracking: Boolean?): String {
         val values = Array<Any>(54) { "" }
         // 时间关系：GPST 自 1980-01-06 起算 ≈ TimeNanos - FullBiasNanos - BiasNanos。
-        // 注意历史字段 utcTimeMillis 在下面没有加 GPS→Unix 起点差 315964800000 ms，
-        // 因而不是 Unix UTC 毫秒！实际转换不读此列，而读 2/5/6 列；本次注释不修改文件格式。
+        // Auxiliary Unix UTC metadata, using current API estimates. P/L/D conversion never reads column 1.
         var utcTimeMillisStr = ""
         val towDecoded = (measurement.state and GnssMeasurement.STATE_TOW_DECODED) != 0 ||
             (measurement.state and 16384) != 0 // STATE_TOW_KNOWN
-        if (towDecoded && clock.hasFullBiasNanos() && clock.hasLeapSecond()) {
-            val bias = if (clock.hasBiasNanos()) clock.biasNanos.toLong() else 0L
-            val gpsTimeNanos = clock.timeNanos - clock.fullBiasNanos - bias
-            val utcTimeNanos = gpsTimeNanos - (clock.leapSecond * 1_000_000_000L)
-            utcTimeMillisStr = (utcTimeNanos / 1_000_000L).toString()
+        if (towDecoded && clock.hasFullBiasNanos()) {
+            val t=ObservationClock.split(clock.timeNanos,clock.fullBiasNanos,
+                if(clock.hasBiasNanos())clock.biasNanos else 0.0,0.0)
+            if(t!=null)utcTimeMillisStr=ObservationClock.utcMetadataMillis(t,
+                if(clock.hasLeapSecond())clock.leapSecond else null).toString()
         }
 
         // 2. 填充 Clock 信息 (★ 直接写入原始值)
         values[0] = "Raw" // 记录类型标识；以 # 开头的行是元数据，不是测量。
-        values[1] = utcTimeMillisStr // 历史辅助时间列，含义限制见上方；TOW/闰秒缺失则为空。
+        values[1] = utcTimeMillisStr // Unix UTC ms; historical files lacked GPS-to-Unix epoch offset.
         values[2] = clock.timeNanos // 硬件接收机时钟读数(ns)，不是 UTC/手机开机时间。
         if (clock.hasLeapSecond()) values[3] = clock.leapSecond // GPST - UTC 的整秒差。
         if (clock.hasTimeUncertaintyNanos()) values[4] = clock.timeUncertaintyNanos // 时钟读数 1σ(ns)。
@@ -327,8 +363,9 @@ class GnssDataLogger(private val context: Context) {
         } else {
             SystemClock.elapsedRealtimeNanos()
         }
-        // 37 IsFullTracking 未采集可靠状态，保持空；请求 setFullTracking(true) 不等于实测状态。
-        values[37] = ""
+        // 37 是 event 的实际报告；旧系统/未报告为空，不能把未知写成 false。
+        // 此列不参与现有 P/L/D 转换；请求 true 也不能替代芯片报告。
+        values[37] = reportedFullTracking?.toString() ?: ""
 
         // 38～40 卫星 ECEF 位置(m)，41～43 速度(m/s)，44 钟差(m)，45 钟漂(m/s)，
         // 46～49 Klobuchar α 系数、50～53 β 系数均为预留列，当前全部空白，并未计算/下载填入。

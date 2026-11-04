@@ -835,12 +835,19 @@ static int pntpos_impl(const obsd_t *obs, int n, const nav_t *nav,
                   char *msg,int startup)
 {
     prcopt_t opt_=*opt;
+    sol_t candidate, *output=sol;
     double *rs,*dts,*var,*azel_,*resp;
     int i,stat,vsat[MAXOBS]={0},svh[MAXOBS];
     unsigned char rejected[MAXOBS]={0};
     
     char tstr[40];
     if(!obs||n<=0||n>MAXOBS){sol->stat=SOLQ_NONE;strcpy(msg,"invalid observation count");return 0;}
+    /* estpos/FDE may write a converged candidate before quality validation.
+     * Keep those writes local, including retries; only commit an accepted SPP.
+     * On failure retain the caller's last trusted numeric solution and mark
+     * its status invalid for this epoch. Satellite fields remain diagnostics. */
+    candidate=*sol;
+    sol=&candidate;
     trace(3,"pntpos  : tobs=%s n=%d\n",time2str(obs[0].time,tstr,3),n);
     
     sol->stat=SOLQ_NONE;
@@ -903,6 +910,11 @@ static int pntpos_impl(const obsd_t *obs, int n, const nav_t *nav,
         }
     }
     free(rs); free(dts); free(var); free(azel_); free(resp);
+    if (stat) *output=*sol;
+    else {
+        output->stat=SOLQ_NONE;
+        trace(2,"$SPP_FAILURE,reason=QUALITY_OR_ESTIMATION,action=KEEP_TRUSTED_SOLUTION,msg=%s\n",msg);
+    }
     return stat;
 }
 extern int pntpos(const obsd_t *obs,int n,const nav_t *nav,const prcopt_t *opt,
